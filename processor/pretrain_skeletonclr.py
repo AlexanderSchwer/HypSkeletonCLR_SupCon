@@ -36,17 +36,22 @@ class SkeletonCLR_Processor(PT_Processor):
         super().__init__(*args, **kwargs)
         
         # Initialize wandb run
-        wandb.init(project="HypSkeletonCLR_SupCon")
-        wandb.config.update({
-            "learning_rate": self.arg.base_lr,
-            "optimizer": self.arg.optimizer,
-            "weight_decay": self.arg.weight_decay,
-            "nesterov": self.arg.nesterov,
-            "num_epochs": self.arg.num_epoch,
-            "sup_epoch": self.arg.sup_epoch,
-            "temperature": self.arg.temperature,
-            "curvature": self.arg.curvature,
-        })
+        self._wandb_ok = True
+        try:
+            wandb.init(project="HypSkeletonCLR_SupCon")
+            wandb.config.update({
+                "learning_rate": self.arg.base_lr,
+                "optimizer": self.arg.optimizer,
+                "weight_decay": self.arg.weight_decay,
+                "nesterov": self.arg.nesterov,
+                "num_epochs": self.arg.num_epoch,
+                "sup_epoch": self.arg.sup_epoch,
+                "temperature": self.arg.temperature,
+                "curvature": self.arg.curvature,
+            })
+        except Exception as exc:
+            self._wandb_ok = False
+            print(f"W&B disabled during init due to error: {exc}")
 
         self.criterion = SupConLoss(temperature=self.arg.temperature, curvature=self.arg.curvature)
 
@@ -58,7 +63,12 @@ class SkeletonCLR_Processor(PT_Processor):
 
         poincare_ball = gt.PoincareBall(self.arg.curvature)
 
-        wandb.watch(self.model)
+        if self._wandb_ok:
+            try:
+                wandb.watch(self.model)
+            except Exception as exc:
+                self._wandb_ok = False
+                print(f"W&B disabled during watch due to error: {exc}")
         # wandb.watch(self.model, log="all") # for logging of parameters panels
         
         '''
@@ -159,9 +169,9 @@ class SkeletonCLR_Processor(PT_Processor):
             self.show_iter_info()
             self.meta_info['iter'] += 1
 
-            if self.global_step % 100 == 0:
+            if self.global_step % self.arg.log_interval == 0:
                 # Log metrics to wandb
-                wandb.log({
+                self._safe_wandb_log({
                     "loss": loss.data.item(),
                     #"supervised_loss": loss_sup.data.item(),
                     #"unsupervised_loss": loss_unsup.data.item(),
@@ -181,7 +191,7 @@ class SkeletonCLR_Processor(PT_Processor):
             print(f"Scaling of Loss Functions -> Unsupervised: {1 - alpha:.4f}, Supervised: {alpha:.4f}")
         
         # Log epoch-level mean loss
-        wandb.log({
+        self._safe_wandb_log({
             "train_mean_loss": np.mean(loss_value),
             "learning_rate": self.lr,
             "epoch": epoch},
@@ -213,3 +223,15 @@ class SkeletonCLR_Processor(PT_Processor):
         # endregion yapf: enable
 
         return parser
+
+    def _safe_wandb_log(self, data, step=None):
+        if not self._wandb_ok:
+            return
+        try:
+            if step is None:
+                wandb.log(data)
+            else:
+                wandb.log(data, step=step)
+        except Exception as exc:
+            self._wandb_ok = False
+            print(f"W&B logging disabled after error: {exc}")
