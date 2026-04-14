@@ -9,6 +9,11 @@ import time
 # torchlight
 import torchlight
 from torchlight import import_class
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # must be set before torch import
+import torch
+print(torch.cuda.device_count())
+print([torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])
 
 from processor.processor import init_seed
 init_seed(0)
