@@ -90,8 +90,9 @@ class Processor(IO):
 
         if self.arg.train_feeder_args:
             train_feeder = import_class(self.arg.train_feeder)
+            train_feeder_args = self._resolve_feeder_paths(self.arg.train_feeder_args)
             self.data_loader['train'] = torch.utils.data.DataLoader(
-                dataset=train_feeder(**self.arg.train_feeder_args),
+                dataset=train_feeder(**train_feeder_args),
                 batch_size=self.arg.batch_size,
                 shuffle=True,
                 pin_memory=True,    # set True when memory is abundant
@@ -102,8 +103,9 @@ class Processor(IO):
                 
         if self.arg.test_feeder_args:
             test_feeder = import_class(self.arg.test_feeder)
+            test_feeder_args = self._resolve_feeder_paths(self.arg.test_feeder_args)
             self.data_loader['test'] = torch.utils.data.DataLoader(
-                dataset=test_feeder(**self.arg.test_feeder_args),
+                dataset=test_feeder(**test_feeder_args),
                 batch_size=self.arg.test_batch_size,
                 shuffle=False,
                 pin_memory=True,
@@ -111,6 +113,24 @@ class Processor(IO):
                     self.arg.device),
                 drop_last=False,
                 worker_init_fn=init_seed)
+
+    def _resolve_single_dataset_path(self, path):
+        if not isinstance(path, str) or not path:
+            return path
+        normalized = os.path.expandvars(os.path.expanduser(path))
+        if os.path.isabs(normalized):
+            return normalized
+        if self.arg.dataset_root:
+            root = os.path.expandvars(os.path.expanduser(self.arg.dataset_root))
+            return os.path.normpath(os.path.join(root, normalized))
+        return normalized
+
+    def _resolve_feeder_paths(self, feeder_args):
+        resolved_args = dict(feeder_args)
+        for key in ('data_path', 'label_path'):
+            if key in resolved_args:
+                resolved_args[key] = self._resolve_single_dataset_path(resolved_args[key])
+        return resolved_args
 
     def show_epoch_info(self):
         for k, v in self.epoch_info.items():
@@ -260,6 +280,7 @@ class Processor(IO):
         parser.add_argument('--num_worker', type=int, default=0, help='the number of worker per gpu for data loader')
         parser.add_argument('--train_feeder_args', action=DictAction, default=dict(), help='the arguments of data loader for training')
         parser.add_argument('--test_feeder_args', action=DictAction, default=dict(), help='the arguments of data loader for test')
+        parser.add_argument('--dataset_root', default='', help='root directory for relative data_path/label_path in feeder args')
         parser.add_argument('--batch_size', type=int, default=256, help='training batch size')
         parser.add_argument('--test_batch_size', type=int, default=256, help='test batch size')
         parser.add_argument('--debug', action="store_true", help='less data, faster loading')

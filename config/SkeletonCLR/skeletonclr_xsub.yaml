@@ -6,8 +6,8 @@ work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/c1_co
 # feeder
 train_feeder: feeder.ntu_feeder.Feeder_dual
 train_feeder_args:
-  data_path: /media/we/Data/Alvaro/datasets/NTU60_frame50/xsub/train_position.npy
-  label_path: /media/we/Data/Alvaro/datasets/NTU-RGB-D/xsub/train_label.pkl
+  data_path: NTU60_frame50/xsub/train_position.npy
+  label_path: NTU-RGB-D/xsub/train_label.pkl
   shear_amplitude: 0.5
   temperal_padding_ratio: 6
   mmap: True
