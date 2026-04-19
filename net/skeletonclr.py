@@ -141,24 +141,24 @@ class SkeletonCLR(nn.Module):
             k_eucl = k.clone().detach()
             k = poincare_ball.expmap0(k) # shape: [batch_size, feature_dim]
         
-        # compute logits
-        # positive logits shape: [batch_size, 1]
-        l_pos = -poincare_ball.dist(q, k).unsqueeze(-1) 
+        # compute contrastive scores
+        # positive scores shape: [batch_size, 1]
+        pos_scores = -poincare_ball.dist(q, k).unsqueeze(-1)
 
-        # negative logits shape: [batch_size, queue_size]
+        # negative scores shape: [batch_size, queue_size]
         # transpose self.queue to match dimensions for pairwise comparison [feature_dim, queue_size]
         # expand q and queue to compute pairwise distances
         # compute all pairwise (negative) hyperbolic distances between q and queue
-        l_neg = -poincare_ball.dist(q.unsqueeze(1), poincare_ball.expmap0(self.queue.clone().detach().T))
+        neg_scores = -poincare_ball.dist(q.unsqueeze(1), poincare_ball.expmap0(self.queue.clone().detach().T))
 
-        # logits shape: [batch_size, 1+queue_size]
-        logits = torch.cat([l_pos, l_neg], dim=1)
+        # scores shape: [batch_size, 1+queue_size]
+        scores = torch.cat([pos_scores, neg_scores], dim=1)
         
         # apply temperature
-        logits /= self.T
+        scores /= self.T
 
         # labels: positive key indicators
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        labels = torch.zeros(scores.shape[0], dtype=torch.long).cuda()
 
         # Combine q (query) and k (key) as two views of the same image
         features = torch.cat([q.unsqueeze(1), k.unsqueeze(1)], dim=1)  # features shape: [batch_size, n_views, feature_dim], with n_views=2 (q and k)
@@ -171,5 +171,5 @@ class SkeletonCLR(nn.Module):
         #self._dequeue_and_enqueue(k)
         self._dequeue_and_enqueue(k_eucl)
 
-        return logits, labels, features
+        return scores, labels, features
         
