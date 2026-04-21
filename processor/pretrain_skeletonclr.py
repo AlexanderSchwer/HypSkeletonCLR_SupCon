@@ -22,6 +22,11 @@ from .processor import Processor
 from .pretrain import PT_Processor
 
 from tools.losses import SupConLoss
+from tools.hyperbolic_hierarchy import (
+    update_affinity_ema,
+    sample_triplets_from_affinity,
+    hierarchy_triplet_loss_hyp,
+)
 
 import wandb
 
@@ -34,11 +39,13 @@ class SkeletonCLR_Processor(PT_Processor):
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.cluster_affinity = None
         
         # Initialize wandb run
         self._wandb_ok = True
         try:
             wandb.init(project="HypSkeletonCLR_SupCon")
+            model_args = self.arg.model_args if isinstance(self.arg.model_args, dict) else {}
             wandb.config.update({
                 "learning_rate": self.arg.base_lr,
                 "optimizer": self.arg.optimizer,
@@ -48,6 +55,13 @@ class SkeletonCLR_Processor(PT_Processor):
                 "sup_epoch": self.arg.sup_epoch,
                 "temperature": self.arg.temperature,
                 "curvature": self.arg.curvature,
+                "cluster_enabled": bool(model_args.get("cluster_enabled", False)),
+                "num_clusters": model_args.get("num_clusters", None),
+                "sinkhorn_tau": model_args.get("sinkhorn_tau", None),
+                "sinkhorn_iters": model_args.get("sinkhorn_iters", None),
+                "sinkhorn_eps": model_args.get("sinkhorn_eps", None),
+                "lambda_sink": self.arg.lambda_sink,
+                "lambda_hier": self.arg.lambda_hier,
             })
         except Exception as exc:
             self._wandb_ok = False
@@ -60,8 +74,8 @@ class SkeletonCLR_Processor(PT_Processor):
         self.adjust_lr()
         loader = self.data_loader['train']
         loss_value = []
-
-        poincare_ball = gt.PoincareBall(self.arg.curvature)
+        sink_loss_value = []
+        hier_loss_value = []
 
         if self._wandb_ok:
             try:
@@ -128,15 +142,16 @@ class SkeletonCLR_Processor(PT_Processor):
                 raise ValueError
 
             # forward
+            model_output = self.model(data1, data2)
+            output, target, features_sup, cluster_pack = self._parse_model_output(model_output)
+
             if epoch < self.arg.sup_epoch:
-                output, target, _ = self.model(data1, data2)
                 if hasattr(self.model, 'module'):
                     self.model.module.update_ptr(output.size(0))
                 else:
                     self.model.update_ptr(output.size(0))
                 loss = self.loss(output, target)
             else:
-                output, target, features_sup = self.model(data1, data2)
                 if hasattr(self.model, 'module'):
                     self.model.module.update_ptr(output.size(0))
                 else:
@@ -145,7 +160,7 @@ class SkeletonCLR_Processor(PT_Processor):
                 #loss_unsup = self.loss(output, target)
                 
                 try:
-                    label_sup = torch.tensor([label_mapping[int(l)] for l in label])
+                    label_sup = torch.tensor([label_mapping[int(l)] for l in label], device=label.device)
                 except NameError:
                     label_sup = label
 
@@ -157,6 +172,12 @@ class SkeletonCLR_Processor(PT_Processor):
                 #loss = (1 - alpha) * loss_unsup + alpha * loss_sup
                 loss = loss_sup
 
+            loss_sink, loss_hier = self._compute_cluster_losses(cluster_pack)
+            if loss_sink is not None:
+                loss = loss + self.arg.lambda_sink * loss_sink
+            if loss_hier is not None:
+                loss = loss + self.arg.lambda_hier * loss_hier
+
             # backward
             self.optimizer.zero_grad()
             loss.backward()
@@ -164,6 +185,18 @@ class SkeletonCLR_Processor(PT_Processor):
 
             # statistics
             self.iter_info['loss'] = loss.data.item()
+            if loss_sink is not None:
+                self.iter_info['loss_sink'] = loss_sink.data.item()
+                sink_loss_value.append(self.iter_info['loss_sink'])
+            elif 'loss_sink' in self.iter_info:
+                del self.iter_info['loss_sink']
+
+            if loss_hier is not None:
+                self.iter_info['loss_hier'] = loss_hier.data.item()
+                hier_loss_value.append(self.iter_info['loss_hier'])
+            elif 'loss_hier' in self.iter_info:
+                del self.iter_info['loss_hier']
+
             self.iter_info['lr'] = '{:.6f}'.format(self.lr)
             loss_value.append(self.iter_info['loss'])
             self.show_iter_info()
@@ -171,17 +204,27 @@ class SkeletonCLR_Processor(PT_Processor):
 
             if self.global_step % self.arg.log_interval == 0:
                 # Log metrics to wandb
-                self._safe_wandb_log({
+                payload = {
                     "loss": loss.data.item(),
                     #"supervised_loss": loss_sup.data.item(),
                     #"unsupervised_loss": loss_unsup.data.item(),
                     "learning_rate": self.lr,
-                    "epoch": epoch},
-                    step=self.global_step)
+                    "epoch": epoch}
+                if loss_sink is not None:
+                    payload["loss_sink"] = loss_sink.data.item()
+                if loss_hier is not None:
+                    payload["loss_hier"] = loss_hier.data.item()
+                self._safe_wandb_log(payload, step=self.global_step)
             
             self.train_log_writer(epoch)
 
         self.epoch_info['train_mean_loss']= np.mean(loss_value)
+        if sink_loss_value:
+            self.epoch_info['train_mean_loss_sink'] = np.mean(sink_loss_value)
+            self.train_writer.add_scalar('loss_sink', self.epoch_info['train_mean_loss_sink'], epoch)
+        if hier_loss_value:
+            self.epoch_info['train_mean_loss_hier'] = np.mean(hier_loss_value)
+            self.train_writer.add_scalar('loss_hier', self.epoch_info['train_mean_loss_hier'], epoch)
         self.train_writer.add_scalar('loss', self.epoch_info['train_mean_loss'], epoch)
 
         if epoch < self.arg.sup_epoch:
@@ -191,11 +234,15 @@ class SkeletonCLR_Processor(PT_Processor):
             print(f"Scaling of Loss Functions -> Unsupervised: {1 - alpha:.4f}, Supervised: {alpha:.4f}")
         
         # Log epoch-level mean loss
-        self._safe_wandb_log({
+        epoch_payload = {
             "train_mean_loss": np.mean(loss_value),
             "learning_rate": self.lr,
-            "epoch": epoch},
-            step=self.global_step)
+            "epoch": epoch}
+        if sink_loss_value:
+            epoch_payload["train_mean_loss_sink"] = np.mean(sink_loss_value)
+        if hier_loss_value:
+            epoch_payload["train_mean_loss_hier"] = np.mean(hier_loss_value)
+        self._safe_wandb_log(epoch_payload, step=self.global_step)
 
         self.show_epoch_info()
 
@@ -219,10 +266,79 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--sup_epoch', type=int, default=1e6, help='the starting epoch of supervised training')
         parser.add_argument('--temperature', type=float, default=0.07, help='the temperature used in supervised training loss')
         parser.add_argument('--curvature', type=float, default=1.0, help='the curvature of the Poincaré ball')
+        parser.add_argument('--lambda_sink', type=float, default=1.0, help='weight for Sinkhorn clustering loss')
+        parser.add_argument('--lambda_hier', type=float, default=0.2, help='weight for hyperbolic hierarchy loss')
+        parser.add_argument('--hier_update_interval', type=int, default=200, help='interval of iterations for hierarchy loss')
+        parser.add_argument('--hier_warmup_steps', type=int, default=1000, help='warmup iterations before hierarchy loss')
+        parser.add_argument('--hier_triplets', type=int, default=512, help='number of hierarchy triplets sampled each update')
+        parser.add_argument('--hier_margin', type=float, default=0.05, help='triplet margin for hierarchy loss')
+        parser.add_argument('--affinity_momentum', type=float, default=0.9, help='EMA momentum for cluster affinity')
         
         # endregion yapf: enable
 
         return parser
+
+    @staticmethod
+    def _parse_model_output(model_output):
+        if not isinstance(model_output, (list, tuple)):
+            raise ValueError("Model output must be tuple/list")
+        if len(model_output) == 3:
+            output, target, features_sup = model_output
+            return output, target, features_sup, None
+        if len(model_output) == 4:
+            output, target, features_sup, cluster_pack = model_output
+            return output, target, features_sup, cluster_pack
+        raise ValueError(f"Unexpected number of outputs from model: {len(model_output)}")
+
+    def _compute_cluster_losses(self, cluster_pack):
+        if cluster_pack is None:
+            return None, None
+        if not isinstance(cluster_pack, dict):
+            raise ValueError("cluster_pack must be a dict when provided")
+
+        cost_q = cluster_pack.get("cost_q", None)
+        q_assign = cluster_pack.get("q_assign", None)
+        logits_q = cluster_pack.get("logits_q", None)
+        q_target = cluster_pack.get("q_target", None)
+        proto_h = cluster_pack.get("proto_h", None)
+
+        if q_assign is None:
+            q_assign = q_target
+        if q_assign is None:
+            return None, None
+
+        if cost_q is not None:
+            log_prob = F.log_softmax(-cost_q, dim=1)
+        elif logits_q is not None:
+            log_prob = F.log_softmax(logits_q, dim=1)
+        else:
+            return None, None
+
+        q_assign = q_assign.detach()
+        loss_sink = -(q_assign * log_prob).sum(dim=1).mean()
+
+        self.cluster_affinity = update_affinity_ema(
+            self.cluster_affinity,
+            q_assign,
+            momentum=self.arg.affinity_momentum,
+        )
+
+        loss_hier = None
+        if (
+            proto_h is not None
+            and self.global_step >= self.arg.hier_warmup_steps
+            and self.global_step % self.arg.hier_update_interval == 0
+        ):
+            triplets = sample_triplets_from_affinity(self.cluster_affinity, self.arg.hier_triplets)
+            if triplets.numel() > 0:
+                loss_hier = hierarchy_triplet_loss_hyp(
+                    proto_h,
+                    triplets,
+                    curvature=self.arg.curvature,
+                    margin=self.arg.hier_margin,
+                )
+
+        return loss_sink, loss_hier
 
     def _safe_wandb_log(self, data, step=None):
         if not self._wandb_ok:

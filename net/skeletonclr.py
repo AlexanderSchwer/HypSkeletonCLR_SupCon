@@ -5,6 +5,7 @@ from torchlight import import_class
 # HYP: libraries
 import geoopt as gt
 import geoopt.manifolds.stereographic.math as pmath 
+from tools.sinkhorn import sinkhorn_balanced_transport
 
 #import tools.hyptorch.pmath as pmath
 
@@ -15,7 +16,9 @@ class SkeletonCLR(nn.Module):
                  momentum=0.999, Temperature=0.07, mlp=True, in_channels=3, hidden_channels=64,
                  hidden_dim=256, num_class=60, dropout=0.5,
                  graph_args={'layout': 'ntu-rgb+d', 'strategy': 'spatial'},
-                 edge_importance_weighting=True, curvature=1.0, **kwargs):
+                 edge_importance_weighting=True, curvature=1.0,
+                 cluster_enabled=False, num_clusters=120, sinkhorn_tau=0.1,
+                 sinkhorn_iters=3, sinkhorn_eps=0.05, **kwargs):
         """
         K: queue size; number of negative keys (default: 32768)
         m: momentum of updating key encoder (default: 0.999)
@@ -25,6 +28,11 @@ class SkeletonCLR(nn.Module):
         super().__init__()
         base_encoder = import_class(base_encoder)
         self.pretrain = pretrain
+        self.cluster_enabled = bool(cluster_enabled and pretrain)
+        self.num_clusters = int(num_clusters)
+        self.sinkhorn_tau = float(sinkhorn_tau)
+        self.sinkhorn_iters = int(sinkhorn_iters)
+        self.sinkhorn_eps = float(sinkhorn_eps)
 
         if not self.pretrain:
             self.encoder_q = base_encoder(in_channels=in_channels, hidden_channels=hidden_channels,
@@ -68,6 +76,17 @@ class SkeletonCLR(nn.Module):
             self.queue = F.normalize(self.queue, dim=0)
             self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
+            if self.cluster_enabled:
+                if self.num_clusters <= 1:
+                    raise ValueError("num_clusters must be > 1 when clustering is enabled")
+                if self.sinkhorn_tau <= 0:
+                    raise ValueError("sinkhorn_tau must be > 0")
+                if self.sinkhorn_iters < 1:
+                    raise ValueError("sinkhorn_iters must be >= 1")
+                if self.sinkhorn_eps <= 0:
+                    raise ValueError("sinkhorn_eps must be > 0")
+                self.proto_tan = nn.Parameter(torch.randn(self.num_clusters, feature_dim))
+
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
         """
@@ -80,7 +99,7 @@ class SkeletonCLR(nn.Module):
     def _dequeue_and_enqueue(self, keys):
         batch_size = keys.shape[0]
         ptr = int(self.queue_ptr)
-        gpu_index = keys.device.index
+        gpu_index = keys.device.index if keys.device.index is not None else 0
         self.queue[:, (ptr + batch_size * gpu_index):(ptr + batch_size * (gpu_index + 1))] = keys.T
 
     @torch.no_grad()
@@ -124,9 +143,9 @@ class SkeletonCLR(nn.Module):
         #im_q = poincare_ball.logmap0(im_q)
 
         # compute query features
-        q = self.encoder_q(im_q)  # queries shape: [batch_size, feature_dim]
-        q = F.normalize(q, dim=1)
-        q = poincare_ball.expmap0(q) # shape: [batch_size, feature_dim]
+        q_e = self.encoder_q(im_q)  # queries shape: [batch_size, feature_dim]
+        q_e = F.normalize(q_e, dim=1)
+        q_h = poincare_ball.expmap0(q_e) # shape: [batch_size, feature_dim]
 
         # compute key features
         with torch.no_grad():  # no gradient to keys
@@ -136,20 +155,20 @@ class SkeletonCLR(nn.Module):
             #im_k = poincare_ball.logmap0(im_k)
 
             # compute key features
-            k = self.encoder_k(im_k)  # keys shape: [batch_size, feature_dim]
-            k = F.normalize(k, dim=1)
-            k_eucl = k.clone().detach()
-            k = poincare_ball.expmap0(k) # shape: [batch_size, feature_dim]
+            k_e = self.encoder_k(im_k)  # keys shape: [batch_size, feature_dim]
+            k_e = F.normalize(k_e, dim=1)
+            k_eucl = k_e.clone().detach()
+            k_h = poincare_ball.expmap0(k_e) # shape: [batch_size, feature_dim]
         
         # compute contrastive scores
         # positive scores shape: [batch_size, 1]
-        pos_scores = -poincare_ball.dist(q, k).unsqueeze(-1)
+        pos_scores = -poincare_ball.dist(q_h, k_h).unsqueeze(-1)
 
         # negative scores shape: [batch_size, queue_size]
         # transpose self.queue to match dimensions for pairwise comparison [feature_dim, queue_size]
         # expand q and queue to compute pairwise distances
         # compute all pairwise (negative) hyperbolic distances between q and queue
-        neg_scores = -poincare_ball.dist(q.unsqueeze(1), poincare_ball.expmap0(self.queue.clone().detach().T))
+        neg_scores = -poincare_ball.dist(q_h.unsqueeze(1), poincare_ball.expmap0(self.queue.clone().detach().T))
 
         # scores shape: [batch_size, 1+queue_size]
         scores = torch.cat([pos_scores, neg_scores], dim=1)
@@ -158,10 +177,10 @@ class SkeletonCLR(nn.Module):
         scores /= self.T
 
         # labels: positive key indicators
-        labels = torch.zeros(scores.shape[0], dtype=torch.long).cuda()
+        labels = torch.zeros(scores.shape[0], dtype=torch.long, device=scores.device)
 
         # Combine q (query) and k (key) as two views of the same image
-        features = torch.cat([q.unsqueeze(1), k.unsqueeze(1)], dim=1)  # features shape: [batch_size, n_views, feature_dim], with n_views=2 (q and k)
+        features = torch.cat([q_h.unsqueeze(1), k_h.unsqueeze(1)], dim=1)  # features shape: [batch_size, n_views, feature_dim], with n_views=2 (q and k)
 
         #queue = poincare_ball.expmap0(self.queue.clone().detach().T).unsqueeze(0) # sh [1, queue_size, feature_dim]
         #queue_reshaped = queue.expand(q.shape[0], -1, -1) # [batch_size, queue_size, feature_dim]
@@ -170,6 +189,33 @@ class SkeletonCLR(nn.Module):
         # dequeue and enqueue
         #self._dequeue_and_enqueue(k)
         self._dequeue_and_enqueue(k_eucl)
+
+        if self.cluster_enabled:
+            proto_tan = F.normalize(self.proto_tan, dim=1)
+            proto_h = poincare_ball.expmap0(proto_tan)
+
+            # OT notation:
+            # C_q/C_k are transport costs between samples and cluster prototypes.
+            cost_q = poincare_ball.dist(q_h.unsqueeze(1), proto_h.unsqueeze(0)) / self.sinkhorn_tau
+            cost_k = poincare_ball.dist(k_h.unsqueeze(1), proto_h.unsqueeze(0)) / self.sinkhorn_tau
+
+            q_assign = sinkhorn_balanced_transport(
+                cost_k.detach(),
+                n_iters=self.sinkhorn_iters,
+                epsilon=self.sinkhorn_eps,
+            )
+            assign_k = torch.argmax(q_assign, dim=1)
+
+            cluster_pack = {
+                "cost_q": cost_q,
+                "q_assign": q_assign,
+                "proto_h": proto_h,
+                "assign_k": assign_k,
+                # Backward compatibility with older loss code paths.
+                "logits_q": -cost_q,
+                "q_target": q_assign,
+            }
+            return scores, labels, features, cluster_pack
 
         return scores, labels, features
         
