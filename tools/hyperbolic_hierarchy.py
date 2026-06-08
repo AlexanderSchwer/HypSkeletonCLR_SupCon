@@ -91,9 +91,22 @@ def sample_triplets_from_affinity(aff, n_triplets):
     return torch.stack(triplets, dim=0)
 
 
+def _lca_surrogate_hyp(x, y, manifold):
+    """
+    Surrogate for the LCA embedding z_ij in hyperbolic space.
+    We average in the tangent space at the origin and map back.
+    """
+    tx = manifold.logmap0(x)
+    ty = manifold.logmap0(y)
+    t_mid = 0.5 * (tx + ty)
+    return manifold.expmap0(t_mid)
+
+
 def hierarchy_triplet_loss_hyp(proto_h, triplets, curvature, margin=0.05):
     """
-    Hyperbolic triplet-ranking surrogate for hierarchical post-clustering.
+    Hyperbolic hierarchical loss aligned with Sec. 3.2:
+    maximize root-distance of positive-pair LCA over negative-pair LCAs
+    with a softmax objective over (a,p), (a,n), (p,n).
     """
     if triplets.numel() == 0:
         return proto_h.new_zeros(())
@@ -112,8 +125,16 @@ def hierarchy_triplet_loss_hyp(proto_h, triplets, curvature, margin=0.05):
     pos = proto_h[positives]
     neg = proto_h[negatives]
 
-    d_pos = poincare_ball.dist(anc, pos)
-    d_neg = poincare_ball.dist(anc, neg)
-    loss = F.relu(d_pos - d_neg + margin).mean()
-    return loss
+    z_ap = _lca_surrogate_hyp(anc, pos, poincare_ball)
+    z_an = _lca_surrogate_hyp(anc, neg, poincare_ball)
+    z_pn = _lca_surrogate_hyp(pos, neg, poincare_ball)
+
+    # In the paper objective, similar pairs should have LCA farther from origin.
+    s_ap = poincare_ball.dist0(z_ap)
+    s_an = poincare_ball.dist0(z_an) + margin
+    s_pn = poincare_ball.dist0(z_pn) + margin
+
+    scores = torch.stack([s_ap, s_an, s_pn], dim=1)
+    target = torch.zeros(scores.shape[0], dtype=torch.long, device=scores.device)
+    return F.cross_entropy(scores, target)
 
