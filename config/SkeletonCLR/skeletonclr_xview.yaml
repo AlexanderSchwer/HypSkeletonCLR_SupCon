@@ -32,6 +32,11 @@ model_args:
     strategy: 'spatial'
   edge_importance_weighting: True
   curvature: 1.0
+  cluster_enabled: True
+  num_clusters: 60
+  sinkhorn_tau: 0.1
+  sinkhorn_iters: 20
+  sinkhorn_eps: 0.05
 
 # optim
 nesterov: True
@@ -53,6 +58,14 @@ view: 'joint'
 sup_epoch: 301
 temperature: 0.07
 curvature: 1.0
+lambda_sink: 1.0
+lambda_hier: 0.2
+hier_update_interval: 200
+hier_warmup_steps: 1000
+hier_triplets: 512
+hier_margin: 0.05
+affinity_momentum: 0.9
+affinity_temperature: 1.0
 
 # log
 save_interval: 5

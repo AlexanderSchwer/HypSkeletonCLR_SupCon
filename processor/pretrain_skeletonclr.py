@@ -23,6 +23,7 @@ from .pretrain import PT_Processor
 
 from tools.losses import SupConLoss
 from tools.hyperbolic_hierarchy import (
+    prototype_affinity_hyp,
     update_affinity_ema,
     sample_triplets_from_affinity,
     hierarchy_triplet_loss_hyp,
@@ -273,6 +274,7 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--hier_triplets', type=int, default=512, help='number of hierarchy triplets sampled each update')
         parser.add_argument('--hier_margin', type=float, default=0.05, help='triplet margin for hierarchy loss')
         parser.add_argument('--affinity_momentum', type=float, default=0.9, help='EMA momentum for cluster affinity')
+        parser.add_argument('--affinity_temperature', type=float, default=1.0, help='temperature for prototype affinity')
         
         # endregion yapf: enable
 
@@ -317,15 +319,22 @@ class SkeletonCLR_Processor(PT_Processor):
         q_assign = q_assign.detach()
         loss_sink = -(q_assign * log_prob).sum(dim=1).mean()
 
-        self.cluster_affinity = update_affinity_ema(
-            self.cluster_affinity,
-            q_assign,
-            momentum=self.arg.affinity_momentum,
-        )
-
         loss_hier = None
+        if proto_h is not None:
+            batch_affinity = prototype_affinity_hyp(
+                proto_h.detach(),
+                curvature=self.arg.curvature,
+                temperature=self.arg.affinity_temperature,
+            )
+            self.cluster_affinity = update_affinity_ema(
+                self.cluster_affinity,
+                batch_affinity,
+                momentum=self.arg.affinity_momentum,
+            )
+
         if (
-            proto_h is not None
+            self.cluster_affinity is not None
+            and proto_h is not None
             and self.global_step >= self.arg.hier_warmup_steps
             and self.global_step % self.arg.hier_update_interval == 0
         ):

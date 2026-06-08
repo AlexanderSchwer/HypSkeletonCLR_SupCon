@@ -18,7 +18,7 @@ class SkeletonCLR(nn.Module):
                  graph_args={'layout': 'ntu-rgb+d', 'strategy': 'spatial'},
                  edge_importance_weighting=True, curvature=1.0,
                  cluster_enabled=False, num_clusters=120, sinkhorn_tau=0.1,
-                 sinkhorn_iters=3, sinkhorn_eps=0.05, **kwargs):
+                 sinkhorn_iters=20, sinkhorn_eps=0.05, **kwargs):
         """
         K: queue size; number of negative keys (default: 32768)
         m: momentum of updating key encoder (default: 0.999)
@@ -85,7 +85,8 @@ class SkeletonCLR(nn.Module):
                     raise ValueError("sinkhorn_iters must be >= 1")
                 if self.sinkhorn_eps <= 0:
                     raise ValueError("sinkhorn_eps must be > 0")
-                self.proto_tan = nn.Parameter(torch.randn(self.num_clusters, feature_dim))
+                self.proto_tan = nn.Parameter(torch.empty(self.num_clusters, feature_dim))
+                nn.init.normal_(self.proto_tan, std=0.1)
 
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
@@ -191,13 +192,14 @@ class SkeletonCLR(nn.Module):
         self._dequeue_and_enqueue(k_eucl)
 
         if self.cluster_enabled:
-            proto_tan = F.normalize(self.proto_tan, dim=1)
+            proto_norm = self.proto_tan.norm(dim=1, keepdim=True).clamp_min(1e-12)
+            proto_tan = self.proto_tan * (torch.tanh(proto_norm) / proto_norm)
             proto_h = poincare_ball.expmap0(proto_tan)
 
             # OT notation:
             # C_q/C_k are transport costs between samples and cluster prototypes.
             cost_q = poincare_ball.dist(q_h.unsqueeze(1), proto_h.unsqueeze(0)) / self.sinkhorn_tau
-            cost_k = poincare_ball.dist(k_h.unsqueeze(1), proto_h.unsqueeze(0)) / self.sinkhorn_tau
+            cost_k = poincare_ball.dist(k_h.unsqueeze(1), proto_h.unsqueeze(0))
 
             q_assign = sinkhorn_balanced_transport(
                 cost_k.detach(),
