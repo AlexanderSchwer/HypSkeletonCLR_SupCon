@@ -63,6 +63,10 @@ class SkeletonCLR_Processor(PT_Processor):
                 "sinkhorn_eps": model_args.get("sinkhorn_eps", None),
                 "lambda_sink": self.arg.lambda_sink,
                 "lambda_hier": self.arg.lambda_hier,
+                "cluster_warmup_steps": self.arg.cluster_warmup_steps,
+                "cluster_ramp_steps": self.arg.cluster_ramp_steps,
+                "hier_warmup_steps": self.arg.hier_warmup_steps,
+                "hier_ramp_steps": self.arg.hier_ramp_steps,
             })
         except Exception as exc:
             self._wandb_ok = False
@@ -173,11 +177,22 @@ class SkeletonCLR_Processor(PT_Processor):
                 #loss = (1 - alpha) * loss_unsup + alpha * loss_sup
                 loss = loss_sup
 
-            loss_sink, loss_hier = self._compute_cluster_losses(cluster_pack)
+            loss_base = loss
+            loss_sink, loss_hier, cluster_metrics = self._compute_cluster_losses(cluster_pack)
+            sink_weight = self._ramp_weight(
+                self.arg.lambda_sink,
+                self.arg.cluster_warmup_steps,
+                self.arg.cluster_ramp_steps,
+            )
+            hier_weight = self._ramp_weight(
+                self.arg.lambda_hier,
+                self.arg.hier_warmup_steps,
+                self.arg.hier_ramp_steps,
+            )
             if loss_sink is not None:
-                loss = loss + self.arg.lambda_sink * loss_sink
+                loss = loss + sink_weight * loss_sink
             if loss_hier is not None:
-                loss = loss + self.arg.lambda_hier * loss_hier
+                loss = loss + hier_weight * loss_hier
 
             # backward
             self.optimizer.zero_grad()
@@ -186,6 +201,10 @@ class SkeletonCLR_Processor(PT_Processor):
 
             # statistics
             self.iter_info['loss'] = loss.data.item()
+            self.iter_info['loss_base'] = loss_base.data.item()
+            self.iter_info['lambda_sink_effective'] = sink_weight
+            self.iter_info['lambda_hier_effective'] = hier_weight
+            self.iter_info.update(cluster_metrics)
             if loss_sink is not None:
                 self.iter_info['loss_sink'] = loss_sink.data.item()
                 sink_loss_value.append(self.iter_info['loss_sink'])
@@ -207,10 +226,14 @@ class SkeletonCLR_Processor(PT_Processor):
                 # Log metrics to wandb
                 payload = {
                     "loss": loss.data.item(),
+                    "loss_base": loss_base.data.item(),
+                    "lambda_sink_effective": sink_weight,
+                    "lambda_hier_effective": hier_weight,
                     #"supervised_loss": loss_sup.data.item(),
                     #"unsupervised_loss": loss_unsup.data.item(),
                     "learning_rate": self.lr,
                     "epoch": epoch}
+                payload.update(cluster_metrics)
                 if loss_sink is not None:
                     payload["loss_sink"] = loss_sink.data.item()
                 if loss_hier is not None:
@@ -267,10 +290,13 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--sup_epoch', type=int, default=1e6, help='the starting epoch of supervised training')
         parser.add_argument('--temperature', type=float, default=0.07, help='the temperature used in supervised training loss')
         parser.add_argument('--curvature', type=float, default=1.0, help='the curvature of the Poincaré ball')
-        parser.add_argument('--lambda_sink', type=float, default=1.0, help='weight for Sinkhorn clustering loss')
-        parser.add_argument('--lambda_hier', type=float, default=0.2, help='weight for hyperbolic hierarchy loss')
+        parser.add_argument('--lambda_sink', type=float, default=1.0, help='maximum weight for Sinkhorn clustering loss')
+        parser.add_argument('--cluster_warmup_steps', type=int, default=1000, help='MoCo-only iterations before Sinkhorn loss')
+        parser.add_argument('--cluster_ramp_steps', type=int, default=2000, help='iterations used to ramp Sinkhorn loss weight')
+        parser.add_argument('--lambda_hier', type=float, default=0.1, help='maximum weight for hyperbolic hierarchy loss')
         parser.add_argument('--hier_update_interval', type=int, default=200, help='interval of iterations for hierarchy loss')
-        parser.add_argument('--hier_warmup_steps', type=int, default=1000, help='warmup iterations before hierarchy loss')
+        parser.add_argument('--hier_warmup_steps', type=int, default=3000, help='warmup iterations before hierarchy loss')
+        parser.add_argument('--hier_ramp_steps', type=int, default=2000, help='iterations used to ramp hierarchy loss weight')
         parser.add_argument('--hier_triplets', type=int, default=512, help='number of hierarchy triplets sampled each update')
         parser.add_argument('--hier_margin', type=float, default=0.05, help='triplet margin for hierarchy loss')
         parser.add_argument('--affinity_momentum', type=float, default=0.9, help='EMA momentum for cluster affinity')
@@ -294,7 +320,7 @@ class SkeletonCLR_Processor(PT_Processor):
 
     def _compute_cluster_losses(self, cluster_pack):
         if cluster_pack is None:
-            return None, None
+            return None, None, {}
         if not isinstance(cluster_pack, dict):
             raise ValueError("cluster_pack must be a dict when provided")
 
@@ -307,19 +333,22 @@ class SkeletonCLR_Processor(PT_Processor):
         if q_assign is None:
             q_assign = q_target
         if q_assign is None:
-            return None, None
+            return None, None, {}
 
         if cost_q is not None:
             log_prob = F.log_softmax(-cost_q, dim=1)
         elif logits_q is not None:
             log_prob = F.log_softmax(logits_q, dim=1)
         else:
-            return None, None
+            return None, None, {}
 
         q_assign = q_assign.detach()
-        loss_sink = -(q_assign * log_prob).sum(dim=1).mean()
+        loss_sink = None
+        if self.global_step >= self.arg.cluster_warmup_steps:
+            loss_sink = -(q_assign * log_prob).sum(dim=1).mean()
 
         loss_hier = None
+        hierarchy_triplet_accuracy = None
         if proto_h is not None:
             batch_affinity = prototype_affinity_hyp(
                 proto_h.detach(),
@@ -346,8 +375,78 @@ class SkeletonCLR_Processor(PT_Processor):
                     curvature=self.arg.curvature,
                     margin=self.arg.hier_margin,
                 )
+                hierarchy_triplet_accuracy = self._hierarchy_triplet_accuracy(
+                    proto_h, triplets
+                )
 
-        return loss_sink, loss_hier
+        metrics = self._cluster_metrics(
+            q_assign,
+            proto_h,
+            self.cluster_affinity,
+            hierarchy_triplet_accuracy,
+        )
+        return loss_sink, loss_hier, metrics
+
+    def _ramp_weight(self, maximum, warmup_steps, ramp_steps):
+        if self.global_step < warmup_steps:
+            return 0.0
+        if ramp_steps <= 0:
+            return float(maximum)
+        progress = min(1.0, (self.global_step - warmup_steps) / float(ramp_steps))
+        return float(maximum) * progress
+
+    def _cluster_metrics(
+        self,
+        q_assign,
+        proto_h,
+        cluster_affinity=None,
+        hierarchy_triplet_accuracy=None,
+    ):
+        with torch.no_grad():
+            assignment_entropy = -(
+                q_assign * q_assign.clamp_min(1e-12).log()
+            ).sum(dim=1).mean()
+            usage = q_assign.sum(dim=0)
+            usage = usage / usage.sum().clamp_min(1e-12)
+            metrics = {
+                "assignment_entropy": assignment_entropy.item(),
+                "cluster_usage_min": usage.min().item(),
+                "cluster_usage_max": usage.max().item(),
+            }
+            if proto_h is not None:
+                manifold = gt.PoincareBall(self.arg.curvature)
+                proto_depth = manifold.dist0(proto_h)
+                metrics.update({
+                    "prototype_depth_mean": proto_depth.mean().item(),
+                    "prototype_depth_max": proto_depth.max().item(),
+                })
+            if cluster_affinity is not None:
+                affinity = cluster_affinity.clamp_min(1e-12)
+                metrics["affinity_entropy"] = (
+                    -(cluster_affinity * affinity.log()).sum().item()
+                )
+            if hierarchy_triplet_accuracy is not None:
+                metrics["hierarchy_triplet_accuracy"] = hierarchy_triplet_accuracy
+            return metrics
+
+    def _hierarchy_triplet_accuracy(self, proto_h, triplets):
+        with torch.no_grad():
+            manifold = gt.PoincareBall(self.arg.curvature)
+            anchor = proto_h[triplets[:, 0]]
+            positive = proto_h[triplets[:, 1]]
+            negative = proto_h[triplets[:, 2]]
+
+            def lca_depth(x, y):
+                return 0.5 * (
+                    manifold.dist0(x) + manifold.dist0(y) - manifold.dist(x, y)
+                )
+
+            positive_depth = lca_depth(anchor, positive)
+            negative_depth = torch.maximum(
+                lca_depth(anchor, negative),
+                lca_depth(positive, negative),
+            )
+            return (positive_depth > negative_depth).float().mean().item()
 
     def _safe_wandb_log(self, data, step=None):
         if not self._wandb_ok:
