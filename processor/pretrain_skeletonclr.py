@@ -2,6 +2,8 @@
 # pylint: disable=W0201
 import sys
 import argparse
+import os
+import subprocess
 import yaml
 import math
 import numpy as np
@@ -44,8 +46,16 @@ class SkeletonCLR_Processor(PT_Processor):
         
         # Initialize wandb run
         self._wandb_ok = True
+        self._wandb_run = None
+        self._wandb_run_dir = None
         try:
-            wandb.init(project="HypSkeletonCLR_SupCon")
+            mode = "offline" if self.arg.wandb_offline else "online"
+            self._wandb_run = wandb.init(
+                project="HypSkeletonCLR_SupCon",
+                mode=mode,
+            )
+            if self._wandb_run is not None and self._wandb_run.dir:
+                self._wandb_run_dir = os.path.dirname(self._wandb_run.dir)
             model_args = self.arg.model_args if isinstance(self.arg.model_args, dict) else {}
             wandb.config.update({
                 "learning_rate": self.arg.base_lr,
@@ -73,6 +83,12 @@ class SkeletonCLR_Processor(PT_Processor):
             print(f"W&B disabled during init due to error: {exc}")
 
         self.criterion = SupConLoss(temperature=self.arg.temperature, curvature=self.arg.curvature)
+
+    def start(self):
+        try:
+            return super().start()
+        finally:
+            self._finish_and_sync_wandb()
 
     def train(self, epoch):
         self.model.train()
@@ -301,6 +317,7 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--hier_margin', type=float, default=0.05, help='triplet margin for hierarchy loss')
         parser.add_argument('--affinity_momentum', type=float, default=0.9, help='EMA momentum for cluster affinity')
         parser.add_argument('--affinity_temperature', type=float, default=1.0, help='temperature for prototype affinity')
+        parser.add_argument('--wandb_offline', type=str2bool, default=False, help='log W&B offline and automatically sync the run when the script exits')
         
         # endregion yapf: enable
 
@@ -459,3 +476,34 @@ class SkeletonCLR_Processor(PT_Processor):
         except Exception as exc:
             self._wandb_ok = False
             print(f"W&B logging disabled after error: {exc}")
+
+    def _finish_and_sync_wandb(self):
+        if self._wandb_run is None:
+            return
+
+        try:
+            self._wandb_run.finish()
+        except Exception as exc:
+            print(f"W&B run finalization failed: {exc}")
+
+        if not self.arg.wandb_offline or not self._wandb_run_dir:
+            return
+
+        print(f"Syncing offline W&B run: {self._wandb_run_dir}")
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "wandb",
+                    "sync",
+                    "--include-offline",
+                    self._wandb_run_dir,
+                ],
+                check=True,
+            )
+        except Exception as exc:
+            print(
+                "Automatic W&B sync failed. The offline run remains available at "
+                f"{self._wandb_run_dir}: {exc}"
+            )
