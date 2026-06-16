@@ -45,42 +45,43 @@ class SkeletonCLR_Processor(PT_Processor):
         self.cluster_affinity = None
         
         # Initialize wandb run
-        self._wandb_ok = True
+        self._wandb_ok = not self.arg.wandb_disabled
         self._wandb_run = None
         self._wandb_run_dir = None
-        try:
-            mode = "offline" if self.arg.wandb_offline else "online"
-            self._wandb_run = wandb.init(
-                project="HypSkeletonCLR_SupCon",
-                mode=mode,
-            )
-            if self._wandb_run is not None and self._wandb_run.dir:
-                self._wandb_run_dir = os.path.dirname(self._wandb_run.dir)
-            model_args = self.arg.model_args if isinstance(self.arg.model_args, dict) else {}
-            wandb.config.update({
-                "learning_rate": self.arg.base_lr,
-                "optimizer": self.arg.optimizer,
-                "weight_decay": self.arg.weight_decay,
-                "nesterov": self.arg.nesterov,
-                "num_epochs": self.arg.num_epoch,
-                "sup_epoch": self.arg.sup_epoch,
-                "temperature": self.arg.temperature,
-                "curvature": self.arg.curvature,
-                "cluster_enabled": bool(model_args.get("cluster_enabled", False)),
-                "num_clusters": model_args.get("num_clusters", None),
-                "sinkhorn_tau": model_args.get("sinkhorn_tau", None),
-                "sinkhorn_iters": model_args.get("sinkhorn_iters", None),
-                "sinkhorn_eps": model_args.get("sinkhorn_eps", None),
-                "lambda_sink": self.arg.lambda_sink,
-                "lambda_hier": self.arg.lambda_hier,
-                "cluster_warmup_steps": self.arg.cluster_warmup_steps,
-                "cluster_ramp_steps": self.arg.cluster_ramp_steps,
-                "hier_warmup_steps": self.arg.hier_warmup_steps,
-                "hier_ramp_steps": self.arg.hier_ramp_steps,
-            })
-        except Exception as exc:
-            self._wandb_ok = False
-            print(f"W&B disabled during init due to error: {exc}")
+        if self._wandb_ok:
+            try:
+                mode = "offline" if self.arg.wandb_offline else "online"
+                self._wandb_run = wandb.init(
+                    project="HypSkeletonCLR_SupCon",
+                    mode=mode,
+                )
+                if self._wandb_run is not None and self._wandb_run.dir:
+                    self._wandb_run_dir = os.path.dirname(self._wandb_run.dir)
+                model_args = self.arg.model_args if isinstance(self.arg.model_args, dict) else {}
+                wandb.config.update({
+                    "learning_rate": self.arg.base_lr,
+                    "optimizer": self.arg.optimizer,
+                    "weight_decay": self.arg.weight_decay,
+                    "nesterov": self.arg.nesterov,
+                    "num_epochs": self.arg.num_epoch,
+                    "sup_epoch": self.arg.sup_epoch,
+                    "temperature": self.arg.temperature,
+                    "curvature": self.arg.curvature,
+                    "cluster_enabled": bool(model_args.get("cluster_enabled", False)),
+                    "num_clusters": model_args.get("num_clusters", None),
+                    "sinkhorn_tau": model_args.get("sinkhorn_tau", None),
+                    "sinkhorn_iters": model_args.get("sinkhorn_iters", None),
+                    "sinkhorn_eps": model_args.get("sinkhorn_eps", None),
+                    "lambda_sink": self.arg.lambda_sink,
+                    "lambda_hier": self.arg.lambda_hier,
+                    "cluster_warmup_steps": self.arg.cluster_warmup_steps,
+                    "cluster_ramp_steps": self.arg.cluster_ramp_steps,
+                    "hier_warmup_steps": self.arg.hier_warmup_steps,
+                    "hier_ramp_steps": self.arg.hier_ramp_steps,
+                })
+            except Exception as exc:
+                self._wandb_ok = False
+                print(f"W&B disabled during init due to error: {exc}")
 
         self.criterion = SupConLoss(temperature=self.arg.temperature, curvature=self.arg.curvature)
 
@@ -318,6 +319,7 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--affinity_momentum', type=float, default=0.9, help='EMA momentum for cluster affinity')
         parser.add_argument('--affinity_temperature', type=float, default=1.0, help='temperature for prototype affinity')
         parser.add_argument('--wandb_offline', type=str2bool, default=False, help='log W&B offline and automatically sync the run when the script exits')
+        parser.add_argument('--wandb_disabled', type=str2bool, default=False, help='disable W&B init, logging, finishing, and sync completely')
         
         # endregion yapf: enable
 
