@@ -5,7 +5,7 @@ from torchlight import import_class
 # HYP: libraries
 import geoopt as gt
 import geoopt.manifolds.stereographic.math as pmath 
-from tools.sinkhorn import sinkhorn_balanced_transport
+from tools.sinkhorn import sinkhorn_balanced_probabilities
 
 #import tools.hyptorch.pmath as pmath
 
@@ -196,26 +196,29 @@ class SkeletonCLR(nn.Module):
             proto_tan = self.proto_tan * (torch.tanh(proto_norm) / proto_norm)
             proto_h = poincare_ball.expmap0(proto_tan)
 
-            # OT notation:
-            # C_q/C_k are transport costs between samples and cluster prototypes.
-            cost_q = poincare_ball.dist(q_h.unsqueeze(1), proto_h.unsqueeze(0)) / self.sinkhorn_tau
-            cost_k = poincare_ball.dist(k_h.unsqueeze(1), proto_h.unsqueeze(0))
+            # Paper notation:
+            # P_ij = p(y_i = j | x_i) are predicted posterior probabilities.
+            # Q_ij = q(y_i = j | x_i) are the same probabilities after OT balancing.
+            dist_q_proto = poincare_ball.dist(q_h.unsqueeze(1), proto_h.unsqueeze(0))
+            dist_k_proto = poincare_ball.dist(k_h.unsqueeze(1), proto_h.unsqueeze(0))
+            p_q = F.softmax(-dist_q_proto / self.sinkhorn_tau, dim=1)
+            p_k = F.softmax(-dist_k_proto / self.sinkhorn_tau, dim=1)
 
-            q_assign = sinkhorn_balanced_transport(
-                cost_k.detach(),
+            q_k = sinkhorn_balanced_probabilities(
+                p_k.detach(),
                 n_iters=self.sinkhorn_iters,
-                epsilon=self.sinkhorn_eps,
+                exponent=self.sinkhorn_tau / self.sinkhorn_eps,
             )
-            assign_k = torch.argmax(q_assign, dim=1)
+            assign_k = torch.argmax(q_k, dim=1)
 
             cluster_pack = {
-                "cost_q": cost_q,
-                "q_assign": q_assign,
+                "dist_q_proto": dist_q_proto,
+                "dist_k_proto": dist_k_proto,
+                "p_q": p_q,
+                "p_k": p_k,
+                "q_k": q_k,
                 "proto_h": proto_h,
                 "assign_k": assign_k,
-                # Backward compatibility with older loss code paths.
-                "logits_q": -cost_q,
-                "q_target": q_assign,
             }
             return scores, labels, features, cluster_pack
 

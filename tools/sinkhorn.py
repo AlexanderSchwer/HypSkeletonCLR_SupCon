@@ -2,46 +2,48 @@ import torch
 
 
 @torch.no_grad()
-def sinkhorn_balanced_transport(
-    cost_matrix,
+def sinkhorn_balanced_probabilities(
+    probability_matrix,
     n_iters=3,
-    epsilon=0.05,
+    exponent=1.0,
     sample_marginal=None,
     cluster_marginal=None,
 ):
     """
-    Entropic optimal transport with balanced Sinkhorn iterations.
+    Balanced Sinkhorn iterations over predicted posterior probabilities.
 
     Notation (matching the paper's pre-clustering view):
-        C in R^{N x K} : transport cost matrix between samples x_i and clusters y_j
-        K = exp(-C / epsilon) : Gibbs kernel
+        P in R^{N x K} : predicted posteriors, P_ij = p(y_i = j | x_i)
+        P^lambda : probability kernel used by Sinkhorn
         a in Delta^N : sample marginal (default uniform 1/N)
         b in Delta^K : cluster marginal (default uniform 1/K)
-        Pi = diag(u) K diag(v) : transport plan
-        Q(y=j|x_i) = Pi_ij / a_i : per-sample soft assignment (rows sum to 1)
+        Pi = diag(u) P^lambda diag(v) : transport plan
+        Q_ij = q(y_i = j | x_i) = Pi_ij / a_i : OT-balanced probabilities
 
     Args:
-        cost_matrix: [N, K]
+        probability_matrix: [N, K], non-negative predicted probabilities
         n_iters: number of Sinkhorn normalization iterations
-        epsilon: entropy regularization strength
+        exponent: paper's lambda applied as P^lambda
         sample_marginal: optional [N] source marginal a (sums to 1)
         cluster_marginal: optional [K] target marginal b (sums to 1)
     Returns:
-        q: [N, K], rows sum to 1
+        q: [N, K], OT-balanced probabilities with rows summing to 1
     """
-    if cost_matrix.dim() != 2:
-        raise ValueError(f"cost_matrix must be 2D [N, K], got shape {tuple(cost_matrix.shape)}")
-    if epsilon <= 0:
-        raise ValueError("epsilon must be > 0")
+    if probability_matrix.dim() != 2:
+        raise ValueError(
+            f"probability_matrix must be 2D [N, K], got shape {tuple(probability_matrix.shape)}"
+        )
+    if exponent <= 0:
+        raise ValueError("exponent must be > 0")
     if n_iters < 1:
         raise ValueError("n_iters must be >= 1")
 
-    n_samples, n_clusters = cost_matrix.shape
+    n_samples, n_clusters = probability_matrix.shape
     if n_samples == 0 or n_clusters == 0:
-        raise ValueError("cost_matrix must have non-zero dimensions")
+        raise ValueError("probability_matrix must have non-zero dimensions")
 
-    device = cost_matrix.device
-    dtype = cost_matrix.dtype
+    device = probability_matrix.device
+    dtype = probability_matrix.dtype
 
     if sample_marginal is None:
         a = torch.full((n_samples,), 1.0 / float(n_samples), device=device, dtype=dtype)
@@ -63,10 +65,13 @@ def sinkhorn_balanced_transport(
         b = cluster_marginal.to(device=device, dtype=dtype)
         b = b / b.sum().clamp_min(1e-12)
 
-    # Stabilize exponentials: row-wise shift is absorbed by Sinkhorn scaling factors.
-    scaled_cost = cost_matrix / epsilon
-    scaled_cost = scaled_cost - scaled_cost.amin(dim=1, keepdim=True)
-    kernel = torch.exp(-scaled_cost).clamp_min(1e-12)
+    if (probability_matrix < 0).any():
+        raise ValueError("probability_matrix must be non-negative")
+
+    # Row-wise normalization keeps the input explicit as probabilities. Any row-wise
+    # factor introduced by this normalization is absorbed by the Sinkhorn scaling.
+    p = probability_matrix / probability_matrix.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    kernel = p.clamp_min(1e-12).pow(exponent)
 
     u = torch.ones((n_samples,), device=device, dtype=dtype)
     v = torch.ones((n_clusters,), device=device, dtype=dtype)
@@ -79,17 +84,3 @@ def sinkhorn_balanced_transport(
     q = transport_plan / a.unsqueeze(1).clamp_min(1e-12)
     q = q / q.sum(dim=1, keepdim=True).clamp_min(1e-12)
     return q
-
-
-@torch.no_grad()
-def sinkhorn_balanced(logits, n_iters=3, eps=0.05, target_prior=None):
-    """
-    Backward-compatible wrapper around OT-form Sinkhorn.
-    """
-    cost_matrix = -logits
-    return sinkhorn_balanced_transport(
-        cost_matrix=cost_matrix,
-        n_iters=n_iters,
-        epsilon=eps,
-        cluster_marginal=target_prior,
-    )

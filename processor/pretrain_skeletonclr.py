@@ -11,7 +11,6 @@ import numpy as np
 # torch
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 
 # torchlight
@@ -343,28 +342,22 @@ class SkeletonCLR_Processor(PT_Processor):
         if not isinstance(cluster_pack, dict):
             raise ValueError("cluster_pack must be a dict when provided")
 
-        cost_q = cluster_pack.get("cost_q", None)
-        q_assign = cluster_pack.get("q_assign", None)
-        logits_q = cluster_pack.get("logits_q", None)
-        q_target = cluster_pack.get("q_target", None)
+        p_q = cluster_pack.get("p_q", None)
+        q_k = cluster_pack.get("q_k", None)
         proto_h = cluster_pack.get("proto_h", None)
 
-        if q_assign is None:
-            q_assign = q_target
-        if q_assign is None:
+        if q_k is None:
             return None, None, {}
 
-        if cost_q is not None:
-            log_prob = F.log_softmax(-cost_q, dim=1)
-        elif logits_q is not None:
-            log_prob = F.log_softmax(logits_q, dim=1)
+        if p_q is not None:
+            log_prob = p_q.clamp_min(1e-12).log()
         else:
             return None, None, {}
 
-        q_assign = q_assign.detach()
+        q_k = q_k.detach()
         loss_sink = None
         if self.global_step >= self.arg.cluster_warmup_steps:
-            loss_sink = -(q_assign * log_prob).sum(dim=1).mean()
+            loss_sink = -(q_k * log_prob).sum(dim=1).mean()
 
         loss_hier = None
         hierarchy_triplet_accuracy = None
@@ -399,7 +392,7 @@ class SkeletonCLR_Processor(PT_Processor):
                 )
 
         metrics = self._cluster_metrics(
-            q_assign,
+            q_k,
             proto_h,
             self.cluster_affinity,
             hierarchy_triplet_accuracy,
@@ -416,16 +409,16 @@ class SkeletonCLR_Processor(PT_Processor):
 
     def _cluster_metrics(
         self,
-        q_assign,
+        q_k,
         proto_h,
         cluster_affinity=None,
         hierarchy_triplet_accuracy=None,
     ):
         with torch.no_grad():
             assignment_entropy = -(
-                q_assign * q_assign.clamp_min(1e-12).log()
+                q_k * q_k.clamp_min(1e-12).log()
             ).sum(dim=1).mean()
-            usage = q_assign.sum(dim=0)
+            usage = q_k.sum(dim=0)
             usage = usage / usage.sum().clamp_min(1e-12)
             metrics = {
                 "assignment_entropy": assignment_entropy.item(),

@@ -10,7 +10,7 @@ from tools.hyperbolic_hierarchy import (
     sample_triplets_from_affinity,
     update_affinity_ema,
 )
-from tools.sinkhorn import sinkhorn_balanced_transport
+from tools.sinkhorn import sinkhorn_balanced_probabilities
 
 
 class HyperbolicHierarchyTest(unittest.TestCase):
@@ -61,15 +61,33 @@ class HyperbolicHierarchyTest(unittest.TestCase):
 
     def test_sinkhorn_approximately_balances_columns(self):
         torch.manual_seed(0)
-        cost = torch.rand(64, 16)
+        probabilities = torch.softmax(torch.rand(64, 16), dim=1)
 
-        assignments = sinkhorn_balanced_transport(cost, n_iters=50, epsilon=0.1)
+        assignments = sinkhorn_balanced_probabilities(
+            probabilities,
+            n_iters=50,
+            exponent=10.0,
+        )
 
         torch.testing.assert_close(assignments.sum(dim=1), torch.ones(64), atol=1e-5, rtol=1e-5)
         expected_column_mass = torch.full((16,), 4.0)
         torch.testing.assert_close(
             assignments.sum(dim=0), expected_column_mass, atol=2e-2, rtol=2e-2
         )
+
+    def test_sinkhorn_returns_probabilities_after_optimal_transport(self):
+        torch.manual_seed(1)
+        p = torch.softmax(torch.rand(32, 8), dim=1)
+
+        q = sinkhorn_balanced_probabilities(
+            p,
+            n_iters=30,
+            exponent=5.0,
+        )
+
+        self.assertEqual(tuple(q.shape), tuple(p.shape))
+        torch.testing.assert_close(q.sum(dim=1), torch.ones(32), atol=1e-6, rtol=1e-6)
+        self.assertTrue((q >= 0).all())
 
 
 if __name__ == "__main__":
