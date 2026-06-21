@@ -5,6 +5,7 @@ work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/c005_
 
 # feeder
 train_feeder: feeder.ntu_feeder.Feeder_dual
+dataset_root: ''
 train_feeder_args:
   data_path: xview/train_data.npy
   label_path: xview/train_label.pkl
