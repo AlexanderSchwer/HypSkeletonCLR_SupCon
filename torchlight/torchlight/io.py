@@ -85,7 +85,10 @@ class IO():
             diff = list(set(state.keys()).difference(set(weights.keys())))
             for d in diff:
                 self.print_log('Can not find weights [{}].'.format(d))
-            state.update(weights)
+            unexpected = list(set(weights.keys()).difference(set(state.keys())))
+            for u in unexpected:
+                self.print_log('Skip unexpected weights [{}].'.format(u))
+            state.update({k: v for k, v in weights.items() if k in state})
             model.load_state_dict(state)
         return model
 
