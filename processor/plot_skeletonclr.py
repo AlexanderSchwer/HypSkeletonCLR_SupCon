@@ -41,7 +41,9 @@ def _get_hyperbolic_tsne_classes():
     except ImportError as exc:
         raise ImportError(
             "hyperbolicTSNE is required for method='hyp_tsne'. "
-            "Install the bundled package from tools/hyperbolic-tsne."
+            "Install the bundled package with "
+            "`python -m pip install -e tools/hyperbolic-tsne`. "
+            f"Original import error: {exc}"
         ) from exc
 
     if hasattr(HyperbolicTSNE, "_validate_data"):
