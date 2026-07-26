@@ -1,4 +1,4 @@
-work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/c005_cosann_no_clust
+work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/c005_cosann_hyp_clust
 
 #weights: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/unsupervised/epoch150_model.pt
 #ignore_weights: [encoder_q.fc, encoder_q_motion.fc, encoder_q_bone.fc, encoder_k, encoder_k_motion, encoder_k_bone, queue, queue_motion, queue_bone]
@@ -33,7 +33,7 @@ model_args:
     strategy: 'spatial'
   edge_importance_weighting: True
   curvature: 1.0
-  cluster_enabled: False
+  cluster_enabled: True
   num_clusters: 60
   sinkhorn_tau: 0.1
   sinkhorn_iters: 20
@@ -59,8 +59,8 @@ view: 'joint'
 sup_epoch: 301
 temperature: 0.07
 curvature: 1.0
-lambda_sink: 0.0
-lambda_hier: 0.0
+lambda_sink: 1.0
+lambda_hier: 0.2
 hier_update_interval: 200
 hier_warmup_steps: 1000
 hier_triplets: 512
