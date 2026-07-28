@@ -4,7 +4,6 @@ import sys
 import argparse
 import yaml
 import os
-import shutil
 import numpy as np
 import random
 import math
@@ -21,6 +20,7 @@ from torchlight import DictAction
 from torchlight import import_class
 
 from .io import IO
+from .work_dir import WORK_DIR_MODES, prepare_training_work_dir
 from tensorboardX import SummaryWriter
 
 
@@ -42,15 +42,10 @@ class Processor(IO):
     def __init__(self, argv=None):
 
         self.load_arg(argv)
+        self.configure_work_dir()
         self.init_environment()
 
         if self.arg.phase == 'train':
-            if os.path.isdir(self.arg.work_dir + '/train'):
-                print('log_dir: ', self.arg.work_dir, 'already exist')
-                shutil.rmtree(self.arg.work_dir + '/train')
-                shutil.rmtree(self.arg.work_dir + '/val')
-                print('Dir removed: ', self.arg.work_dir + '/train')
-                print('Dir removed: ', self.arg.work_dir + '/val')
             self.train_writer = SummaryWriter(os.path.join(self.arg.work_dir, 'train'), 'train')
             self.val_writer = SummaryWriter(os.path.join(self.arg.work_dir, 'val'), 'val')
         else:
@@ -63,6 +58,19 @@ class Processor(IO):
         self.load_optimizer()
 
         self.global_step = 0
+
+    def configure_work_dir(self):
+        if self.arg.phase != 'train':
+            return
+
+        requested_work_dir = self.arg.work_dir
+        self.arg.work_dir = prepare_training_work_dir(
+            self.arg.work_dir,
+            mode=self.arg.work_dir_mode,
+            run_id=self.arg.run_id,
+            run_subdir=self.arg.run_subdir)
+        if self.arg.work_dir != os.path.normpath(requested_work_dir):
+            print('Training output directory: {}'.format(self.arg.work_dir))
 
     def train_log_writer(self, epoch):
         self.train_writer.add_scalar('batch_loss', self.iter_info['loss'], self.global_step)
@@ -257,6 +265,12 @@ class Processor(IO):
 
         parser.add_argument('-w', '--work_dir', default='./work_dir/tmp', help='the work folder for storing results')
         parser.add_argument('-c', '--config', default=None, help='path to the configuration file')
+        parser.add_argument('--work_dir_mode', default='auto', choices=WORK_DIR_MODES,
+                            help='auto creates a unique run directory; error fails if work_dir exists; resume uses work_dir exactly')
+        parser.add_argument('--run_id', default=None,
+                            help='optional run id used below work_dir/run_subdir when work_dir_mode is auto')
+        parser.add_argument('--run_subdir', default='runs',
+                            help='subdirectory below work_dir for automatic run directories')
 
         # processor
         parser.add_argument('--phase', default='train', help='must be train or test')
