@@ -13,7 +13,9 @@ hyperbolicTSNE/solver_.py
 hyperbolicTSNE/util.py
 hyperbolicTSNE/visualization.py
 hyperbolicTSNE/hyperbolic_barnes_hut/tsne.cpp
+hyperbolicTSNE/hyperbolic_barnes_hut/tsne.pyx
 hyperbolicTSNE/hyperbolic_barnes_hut/tsne_utils.cpp
+hyperbolicTSNE/hyperbolic_barnes_hut/tsne_utils.pyx
 hyperbolic_tsne.egg-info/PKG-INFO
 hyperbolic_tsne.egg-info/SOURCES.txt
 hyperbolic_tsne.egg-info/dependency_links.txt
