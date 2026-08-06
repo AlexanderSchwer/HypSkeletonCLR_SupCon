@@ -29,6 +29,10 @@ from tools.hyperbolic_hierarchy import (
     sample_triplets_from_affinity,
     hierarchy_triplet_loss_hyp,
 )
+from tools.hyperbolic_embedding_plot import (
+    DEFAULT_NEGATIVE_DISTANCE_SAMPLES,
+    render_embedding_diagnostics,
+)
 
 import wandb
 
@@ -77,6 +81,9 @@ class SkeletonCLR_Processor(PT_Processor):
                     "cluster_ramp_steps": self.arg.cluster_ramp_steps,
                     "hier_warmup_steps": self.arg.hier_warmup_steps,
                     "hier_ramp_steps": self.arg.hier_ramp_steps,
+                    "embedding_plot_interval": self.arg.embedding_plot_interval,
+                    "embedding_plot_max_samples": self.arg.embedding_plot_max_samples,
+                    "embedding_plot_methods": self.arg.embedding_plot_methods,
                 })
             except Exception as exc:
                 self._wandb_ok = False
@@ -97,6 +104,11 @@ class SkeletonCLR_Processor(PT_Processor):
         loss_value = []
         sink_loss_value = []
         hier_loss_value = []
+        embedding_snapshot = (
+            self._new_embedding_snapshot(loader)
+            if self._should_plot_embeddings(epoch)
+            else None
+        )
 
         if self._wandb_ok:
             try:
@@ -165,6 +177,12 @@ class SkeletonCLR_Processor(PT_Processor):
             # forward
             model_output = self.model(data1, data2)
             output, target, features_sup, cluster_pack = self._parse_model_output(model_output)
+            self._accumulate_embedding_snapshot(
+                embedding_snapshot,
+                features_sup,
+                label,
+                output,
+            )
 
             if epoch < self.arg.sup_epoch:
                 if hasattr(self.model, 'module'):
@@ -284,6 +302,9 @@ class SkeletonCLR_Processor(PT_Processor):
             epoch_payload["train_mean_loss_hier"] = np.mean(hier_loss_value)
         self._safe_wandb_log(epoch_payload, step=self.global_step)
 
+        if embedding_snapshot is not None:
+            self._render_embedding_snapshot(epoch, embedding_snapshot)
+
         self.show_epoch_info()
 
     @staticmethod
@@ -319,6 +340,9 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--affinity_temperature', type=float, default=1.0, help='temperature for prototype affinity')
         parser.add_argument('--wandb_offline', type=str2bool, default=False, help='log W&B offline and automatically sync the run when the script exits')
         parser.add_argument('--wandb_disabled', type=str2bool, default=False, help='disable W&B init, logging, finishing, and sync completely')
+        parser.add_argument('--embedding_plot_interval', type=int, default=0, help='render embedding diagnostic plots every N epochs; 0 disables live plotting')
+        parser.add_argument('--embedding_plot_max_samples', type=int, default=1024, help='maximum epoch samples retained for each embedding plot')
+        parser.add_argument('--embedding_plot_methods', default=['poincare', 'logmap_pca_disk', 'hyp_tsne'], nargs='+', help='projection methods: poincare, logmap_pca, logmap_pca_disk, logmap_tsne, hyp_tsne')
         
         # endregion yapf: enable
 
@@ -459,6 +483,156 @@ class SkeletonCLR_Processor(PT_Processor):
                 lca_depth(positive, negative),
             )
             return (positive_depth > negative_depth).float().mean().item()
+
+    def _should_plot_embeddings(self, epoch):
+        interval = int(self.arg.embedding_plot_interval)
+        if interval <= 0:
+            return False
+        if epoch == 1:
+            return True
+        return epoch % interval == 0
+
+    def _new_embedding_snapshot(self, loader):
+        max_negatives = DEFAULT_NEGATIVE_DISTANCE_SAMPLES
+        try:
+            loader_len = max(1, len(loader))
+        except TypeError:
+            loader_len = 1
+        negatives_per_batch = int(math.ceil(max_negatives / float(loader_len))) if max_negatives else 0
+        return {
+            "embeddings": [],
+            "labels": [],
+            "positive_distances": [],
+            "negative_distances": [],
+            "sample_count": 0,
+            "negative_count": 0,
+            "max_samples": max(0, int(self.arg.embedding_plot_max_samples)),
+            "max_negatives": max_negatives,
+            "negatives_per_batch": negatives_per_batch,
+        }
+
+    def _accumulate_embedding_snapshot(self, snapshot, features_sup, label, output):
+        if snapshot is None:
+            return
+        with torch.no_grad():
+            self._accumulate_embedding_points(snapshot, features_sup, label)
+            positive_distances, negative_distances = self._contrastive_distances_from_output(output)
+            if positive_distances is not None:
+                snapshot["positive_distances"].append(positive_distances.cpu())
+            if negative_distances is not None:
+                remaining = snapshot["max_negatives"] - snapshot["negative_count"]
+                take = min(snapshot["negatives_per_batch"], remaining, negative_distances.numel())
+                if take > 0:
+                    indices = torch.randint(
+                        negative_distances.numel(),
+                        (take,),
+                        device=negative_distances.device,
+                    )
+                    snapshot["negative_distances"].append(negative_distances[indices].cpu())
+                    snapshot["negative_count"] += take
+
+    def _accumulate_embedding_points(self, snapshot, features_sup, label):
+        remaining = snapshot["max_samples"] - snapshot["sample_count"]
+        if remaining <= 0 or features_sup is None:
+            return
+
+        if features_sup.dim() == 3:
+            embeddings = features_sup[:, 0, :]
+            labels = label
+        else:
+            embeddings = features_sup
+            labels = label
+
+        if embeddings.size(0) > remaining:
+            indices = torch.randperm(embeddings.size(0), device=embeddings.device)[:remaining]
+            embeddings = embeddings[indices]
+            labels = labels[indices]
+
+        snapshot["embeddings"].append(embeddings.detach().cpu())
+        snapshot["labels"].append(labels.detach().cpu())
+        snapshot["sample_count"] += embeddings.size(0)
+
+    def _contrastive_distances_from_output(self, output):
+        if output is None or output.dim() != 2 or output.size(1) < 2:
+            return None, None
+        temperature = self._model_temperature()
+        distances = (-output.detach() * temperature).clamp_min(0)
+        return distances[:, 0], distances[:, 1:].reshape(-1)
+
+    def _model_temperature(self):
+        model = self._unwrap_model()
+        return float(getattr(model, "T", self.arg.temperature))
+
+    def _unwrap_model(self):
+        return self.model.module if hasattr(self.model, "module") else self.model
+
+    def _current_cluster_centroids(self):
+        model = self._unwrap_model()
+        if not getattr(model, "cluster_enabled", False) or not hasattr(model, "proto_tan"):
+            return None
+        with torch.no_grad():
+            proto_tan = model.proto_tan.detach()
+            proto_norm = proto_tan.norm(dim=1, keepdim=True).clamp_min(1e-12)
+            proto_tan = proto_tan * (torch.tanh(proto_norm) / proto_norm)
+            manifold = gt.PoincareBall(c=float(self.arg.curvature))
+            proto_h = manifold.projx(manifold.expmap0(proto_tan))
+        return proto_h.cpu().numpy()
+
+    def _embedding_plot_methods(self):
+        methods = self.arg.embedding_plot_methods
+        if isinstance(methods, str):
+            return [method.strip() for method in methods.split(",") if method.strip()]
+        return list(methods)
+
+    def _render_embedding_snapshot(self, epoch, snapshot):
+        if not snapshot["embeddings"]:
+            print(f"Skipping embedding diagnostics for epoch {epoch}: no samples collected.")
+            return
+
+        embeddings = torch.cat(snapshot["embeddings"], dim=0).numpy()
+        labels = torch.cat(snapshot["labels"], dim=0).numpy()
+        positive_distances = (
+            torch.cat(snapshot["positive_distances"], dim=0).numpy()
+            if snapshot["positive_distances"]
+            else None
+        )
+        negative_distances = (
+            torch.cat(snapshot["negative_distances"], dim=0).numpy()
+            if snapshot["negative_distances"]
+            else None
+        )
+        output_dir = os.path.join(self.arg.work_dir, "embedding_plots")
+
+        try:
+            paths = render_embedding_diagnostics(
+                embeddings,
+                labels,
+                output_dir=output_dir,
+                epoch=epoch,
+                curvature=self.arg.curvature,
+                centroids=self._current_cluster_centroids(),
+                positive_distances=positive_distances,
+                negative_distances=negative_distances,
+                projection_methods=self._embedding_plot_methods(),
+            )
+        except Exception as exc:
+            print(f"Embedding diagnostics failed for epoch {epoch}: {exc}")
+            return
+
+        if paths:
+            self.io.print_log(
+                "Saved embedding diagnostics for epoch {} to {}".format(epoch, output_dir)
+            )
+            self._safe_wandb_image_log(paths)
+
+    def _safe_wandb_image_log(self, paths):
+        if not self._wandb_ok:
+            return
+        payload = {}
+        for path in paths:
+            key = os.path.splitext(os.path.basename(path))[0]
+            payload[f"embedding_diagnostics/{key}"] = wandb.Image(path)
+        self._safe_wandb_log(payload, step=self.global_step)
 
     def _safe_wandb_log(self, data, step=None):
         if not self._wandb_ok:
