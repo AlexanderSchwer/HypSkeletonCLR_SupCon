@@ -28,6 +28,8 @@ DEFAULT_HYP_TSNE_PERPLEXITY = 30.0
 DEFAULT_HYP_TSNE_CHUNK_SIZE = 256
 DEFAULT_HYP_TSNE_EXAGGERATION_ITER = 250
 DEFAULT_HYP_TSNE_ITER = 750
+DEFAULT_HYP_TSNE_LEARNING_RATE = 0.1
+DEFAULT_HYP_TSNE_BOUNDARY_FRACTION_LIMIT = 0.75
 DEFAULT_HYP_TSNE_VERBOSE = 0
 DEFAULT_ANNOTATE_CENTROIDS = True
 DEFAULT_ANNOTATE_CENTROIDS_MAX = 80
@@ -220,7 +222,13 @@ def _project_for_plot(
             gradient_descent_iter=hyp_tsne_iter,
             verbose=hyp_tsne_verbose,
         )
-        xy = _clip_to_radius(np.asarray(xy, dtype=np.float32), radius=1.0)
+        xy = np.asarray(xy, dtype=np.float32)
+        _raise_if_boundary_saturated(
+            xy,
+            radius=1.0,
+            fraction_limit=DEFAULT_HYP_TSNE_BOUNDARY_FRACTION_LIMIT,
+        )
+        xy = _clip_to_radius(xy, radius=1.0)
         sample_xy, centroid_xy = _split_projection(xy, n_samples)
         return sample_xy, centroid_xy, True, 1.0
 
@@ -452,6 +460,20 @@ def _clip_to_radius(points, radius):
     return points * scale
 
 
+def _raise_if_boundary_saturated(points, radius, fraction_limit):
+    norms = np.linalg.norm(points, axis=1)
+    finite_norms = norms[np.isfinite(norms)]
+    if finite_norms.size == 0:
+        raise ValueError("hyperbolic t-SNE returned no finite points.")
+    boundary_fraction = np.mean(finite_norms >= radius * 0.98)
+    if boundary_fraction > fraction_limit:
+        raise ValueError(
+            "hyperbolic t-SNE projection is boundary-saturated "
+            f"({boundary_fraction:.1%} of points have radius >= {radius * 0.98:.3f}). "
+            "The projection is likely not interpretable."
+        )
+
+
 def _get_hyperbolic_tsne_classes():
     try:
         from hyperbolicTSNE import HyperbolicTSNE, SequentialOptimizer
@@ -510,6 +532,8 @@ def _poincare_knn_distances(features, curvature, perplexity, chunk_size=256):
                 largest=False,
                 sorted=True,
             )
+            # The bundled h-tSNE affinity code expects squared neighbor distances.
+            knn_distances = knn_distances.pow(2)
             data.extend(knn_distances.cpu().numpy().astype(np.float32).ravel())
             indices.extend(knn_indices.cpu().numpy().astype(np.int32).ravel())
             for _ in range(end - start):
@@ -549,8 +573,9 @@ def _hyperbolic_tsne(
     opt_params = SequentialOptimizer.sequence_poincare(
         exaggeration_its=exaggeration_iter,
         gradientDescent_its=gradient_descent_iter,
-        learning_rate_main=35,
-        vanilla=True,
+        learning_rate_ex=DEFAULT_HYP_TSNE_LEARNING_RATE,
+        learning_rate_main=DEFAULT_HYP_TSNE_LEARNING_RATE,
+        vanilla=False,
         exact=False,
         area_split=False,
         n_iter_check=10,

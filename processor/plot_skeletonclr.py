@@ -34,6 +34,9 @@ from sklearn.preprocessing import normalize
 import geoopt as gt
 import geoopt.manifolds.stereographic.math as pmath 
 
+HYP_TSNE_LEARNING_RATE = 0.1
+HYP_TSNE_BOUNDARY_FRACTION_LIMIT = 0.75
+
 
 def _get_hyperbolic_tsne_classes():
     try:
@@ -95,6 +98,8 @@ def _poincare_knn_distances(features, curvature, perplexity, chunk_size=256):
                 largest=False,
                 sorted=True,
             )
+            # The bundled h-tSNE affinity code expects squared neighbor distances.
+            knn_distances = knn_distances.pow(2)
             data.extend(knn_distances.cpu().numpy().astype(np.float32).ravel())
             indices.extend(knn_indices.cpu().numpy().astype(np.int32).ravel())
             for _ in range(end - start):
@@ -130,8 +135,9 @@ def _hyperbolic_tsne(features, n_components, random_state, curvature,
     opt_params = SequentialOptimizer.sequence_poincare(
         exaggeration_its=exaggeration_iter,
         gradientDescent_its=gradient_descent_iter,
-        learning_rate_main=35,
-        vanilla=True,
+        learning_rate_ex=HYP_TSNE_LEARNING_RATE,
+        learning_rate_main=HYP_TSNE_LEARNING_RATE,
+        vanilla=False,
         exact=False,
         area_split=False,
         n_iter_check=10,
@@ -199,6 +205,11 @@ def visualize_latent_space(features, labels, method='pca', n_components=2, rando
             gradient_descent_iter=hyp_tsne_iter,
             verbose=hyp_tsne_verbose,
         )
+        _raise_if_boundary_saturated(
+            reduced_features,
+            radius=1.0,
+            fraction_limit=HYP_TSNE_BOUNDARY_FRACTION_LIMIT,
+        )
     else:
         reduced_features = reducer.fit_transform(features)
 
@@ -243,6 +254,21 @@ def visualize_latent_space(features, labels, method='pca', n_components=2, rando
         print(f"Plot saved as {save_path}.")
     
     plt.close()
+
+
+def _raise_if_boundary_saturated(points, radius, fraction_limit):
+    points = np.asarray(points, dtype=np.float32)
+    norms = np.linalg.norm(points, axis=1)
+    finite_norms = norms[np.isfinite(norms)]
+    if finite_norms.size == 0:
+        raise ValueError("hyperbolic t-SNE returned no finite points.")
+    boundary_fraction = np.mean(finite_norms >= radius * 0.98)
+    if boundary_fraction > fraction_limit:
+        raise ValueError(
+            "hyperbolic t-SNE projection is boundary-saturated "
+            f"({boundary_fraction:.1%} of points have radius >= {radius * 0.98:.3f}). "
+            "The projection is likely not interpretable."
+        )
 
 class SkeletonCLR_Plotting(PT_Processor):
     def __init__(self, *args, **kwargs):
