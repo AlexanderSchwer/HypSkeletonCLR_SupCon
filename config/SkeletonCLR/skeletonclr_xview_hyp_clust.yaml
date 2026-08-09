@@ -71,7 +71,7 @@ affinity_temperature: 1.0
 # live embedding diagnostics
 embedding_plot_interval: 5
 embedding_plot_max_samples: 1024
-embedding_plot_methods: [poincare, logmap_pca_disk, hyp_tsne]
+embedding_plot_methods: [logmap_pca_disk, hyp_tsne]
 # fixed groups: dressing/wearing=[13..20], posture/balance/falling=[7,8,41,42], leg-dominant=[23,25,26,50]
 
 # log

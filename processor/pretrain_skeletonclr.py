@@ -342,7 +342,7 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--wandb_disabled', type=str2bool, default=False, help='disable W&B init, logging, finishing, and sync completely')
         parser.add_argument('--embedding_plot_interval', type=int, default=0, help='render embedding diagnostic plots every N epochs; 0 disables live plotting')
         parser.add_argument('--embedding_plot_max_samples', type=int, default=1024, help='maximum epoch samples retained for each embedding plot')
-        parser.add_argument('--embedding_plot_methods', default=['poincare', 'logmap_pca_disk', 'hyp_tsne'], nargs='+', help='projection methods: poincare, logmap_pca, logmap_pca_disk, logmap_tsne, hyp_tsne')
+        parser.add_argument('--embedding_plot_methods', default=['logmap_pca_disk', 'hyp_tsne'], nargs='+', help='projection methods: logmap_pca, logmap_pca_disk, logmap_tsne, hyp_tsne')
         
         # endregion yapf: enable
 

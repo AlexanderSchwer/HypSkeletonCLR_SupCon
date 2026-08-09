@@ -20,7 +20,7 @@ DEFAULT_HIERARCHY_GROUPS = OrderedDict([
     ("posture_balance_falling", (7, 8, 41, 42)),
     ("leg_dominant_dynamic", (23, 25, 26, 50)),
 ])
-DEFAULT_PROJECTION_METHODS = ("poincare", "logmap_pca_disk", "hyp_tsne")
+DEFAULT_PROJECTION_METHODS = ("logmap_pca_disk", "hyp_tsne")
 DEFAULT_COLOR_BY = "hierarchy"
 DEFAULT_RANDOM_STATE = 42
 DEFAULT_NEGATIVE_DISTANCE_SAMPLES = 8192
@@ -189,11 +189,6 @@ def _project_for_plot(
     if centroids is not None:
         all_points = np.concatenate([embeddings, centroids], axis=0)
 
-    if method in ("poincare", "poincare_first2", "poincare_disk"):
-        xy = _first_two_dimensions(all_points)
-        sample_xy, centroid_xy = _split_projection(xy, n_samples)
-        return sample_xy, centroid_xy, True, _ball_radius(curvature)
-
     if method in ("logmap_pca", "tangent_pca"):
         tangent = _logmap0(all_points, curvature)
         xy = _pca_2d(tangent, random_state=random_state)
@@ -230,7 +225,7 @@ def _project_for_plot(
         return sample_xy, centroid_xy, True, 1.0
 
     raise ValueError(
-        "Unknown projection method '{}'. Supported methods: poincare, "
+        "Unknown projection method '{}'. Supported methods: "
         "logmap_pca, logmap_pca_disk, logmap_tsne, hyp_tsne.".format(method)
     )
 
@@ -239,14 +234,6 @@ def _split_projection(xy, n_samples):
     sample_xy = xy[:n_samples]
     centroid_xy = xy[n_samples:] if xy.shape[0] > n_samples else None
     return sample_xy, centroid_xy
-
-
-def _first_two_dimensions(points):
-    if points.shape[1] >= 2:
-        return points[:, :2].astype(np.float32)
-    padded = np.zeros((points.shape[0], 2), dtype=np.float32)
-    padded[:, 0] = points[:, 0]
-    return padded
 
 
 def _logmap0(points, curvature):
@@ -268,7 +255,11 @@ def _expmap0(points, curvature):
 
 def _pca_2d(points, random_state):
     if points.shape[0] < 2:
-        return _first_two_dimensions(points)
+        padded = np.zeros((points.shape[0], 2), dtype=np.float32)
+        if points.shape[1] > 0:
+            width = min(points.shape[1], 2)
+            padded[:, :width] = points[:, :width]
+        return padded
     reducer = PCA(n_components=2, random_state=random_state)
     return reducer.fit_transform(points).astype(np.float32)
 
