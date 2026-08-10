@@ -5,6 +5,15 @@ from datetime import datetime
 
 
 WORK_DIR_MODES = ('auto', 'error', 'resume')
+WORK_DIR_LAYOUTS = ('canonical', 'manual')
+
+_RUN_FAMILIES = (
+    'crossclr_3views',
+    'crossclr',
+    'linear_eval',
+    'plotting',
+    'skeletonclr',
+)
 
 
 def prepare_training_work_dir(work_dir, mode='auto', run_id=None, run_subdir='runs'):
@@ -27,6 +36,15 @@ def prepare_training_work_dir(work_dir, mode='auto', run_id=None, run_subdir='ru
     base_work_dir = _strip_existing_run_leaf(work_dir, run_subdir)
     run_id = _clean_path_component(run_id, 'run_id') if run_id else _default_run_id()
     return _reserve_unique_dir(os.path.join(base_work_dir, run_subdir, run_id))
+
+
+def build_canonical_work_dir(arg, processor_name=None):
+    """Build a stable experiment base path from the actual run arguments."""
+    family = _infer_run_family(arg, processor_name)
+    root = _infer_work_dir_root(getattr(arg, 'work_dir', 'work_dir'), family)
+    setup = _build_setup_component(arg)
+    experiment = _build_experiment_component(arg)
+    return os.path.join(root, family, setup, experiment)
 
 
 def _default_run_id():
@@ -62,3 +80,204 @@ def _clean_path_component(value, name):
     if value in ('.', '..') or os.path.basename(value) != value:
         raise ValueError('{} must be a single path component'.format(name))
     return value
+
+
+def _infer_run_family(arg, processor_name=None):
+    haystack = ' '.join([
+        str(getattr(arg, 'config', '') or ''),
+        str(getattr(arg, 'model', '') or ''),
+        str(getattr(arg, 'work_dir', '') or ''),
+        str(processor_name or ''),
+    ]).lower()
+
+    if 'crossclr_3views' in haystack:
+        return 'crossclr_3views'
+    if 'crossclr' in haystack:
+        return 'crossclr'
+    if 'linear_eval' in haystack or processor_name == 'LE_Processor':
+        return 'linear_eval'
+    if 'plot' in haystack:
+        return 'plotting'
+    if 'skeletonclr' in haystack:
+        return 'skeletonclr'
+    return 'training'
+
+
+def _infer_work_dir_root(work_dir, family):
+    work_dir = os.path.normpath(os.path.expandvars(os.path.expanduser(work_dir)))
+    drive, tail = os.path.splitdrive(work_dir)
+    parts = [part for part in re.split(r'[\\/]+', tail) if part]
+
+    if 'work_dir' in parts:
+        index = parts.index('work_dir')
+        return _join_path_prefix(drive, os.path.isabs(work_dir), parts[:index + 1])
+
+    for run_family in _RUN_FAMILIES + (family,):
+        if run_family in parts:
+            index = parts.index(run_family)
+            prefix = parts[:index] or ['work_dir']
+            return _join_path_prefix(drive, os.path.isabs(work_dir), prefix)
+
+    if os.path.basename(work_dir) == family:
+        return os.path.dirname(work_dir) or '.'
+    return work_dir
+
+
+def _join_path_prefix(drive, is_absolute, parts):
+    if not parts:
+        return drive + os.sep if is_absolute else (drive or '.')
+    prefix = os.path.join(*parts)
+    if is_absolute:
+        root = drive + os.sep if drive else os.sep
+        return os.path.join(root, prefix)
+    if drive:
+        return drive + prefix
+    return prefix
+
+
+def _build_setup_component(arg):
+    model_args = getattr(arg, 'model_args', {}) or {}
+    data_paths = _feeder_arg_strings(arg)
+    config_paths = _config_arg_strings(arg)
+    work_dir_paths = [str(getattr(arg, 'work_dir', '') or '')]
+    paths = data_paths + config_paths + work_dir_paths
+
+    dataset = _infer_dataset(model_args, paths)
+    split = (_infer_split(data_paths) or
+             _infer_split(config_paths) or
+             _infer_split(work_dir_paths))
+    frame_count = (_infer_frame_count(data_paths) or
+                   _infer_frame_count(config_paths) or
+                   _infer_frame_count(work_dir_paths))
+    hidden_channels = model_args.get('hidden_channels')
+
+    parts = [dataset]
+    if split:
+        parts.append(split)
+    if frame_count:
+        parts.append('frame{}'.format(frame_count))
+    if hidden_channels is not None:
+        parts.append('hc{}'.format(hidden_channels))
+    return _slug('-'.join(parts))
+
+
+def _build_experiment_component(arg):
+    model_args = getattr(arg, 'model_args', {}) or {}
+    tags = []
+
+    geometry_impl = _infer_geometry_impl(arg)
+    if geometry_impl:
+        tags.append(geometry_impl)
+        curvature = model_args.get('curvature', getattr(arg, 'curvature', None))
+        if curvature is not None:
+            tags.append('c{}'.format(_format_value(curvature)))
+
+    if bool(model_args.get('cluster_enabled', False)):
+        num_clusters = model_args.get('num_clusters')
+        if num_clusters is not None:
+            tags.append('clust{}'.format(num_clusters))
+
+    base_lr = getattr(arg, 'base_lr', None)
+    if base_lr is not None:
+        tags.append('lrb{}'.format(_format_value(base_lr)))
+
+    scheduler_tag = _infer_scheduler_tag(arg)
+    if scheduler_tag:
+        tags.append(scheduler_tag)
+
+    if not tags:
+        tags.append('default')
+    return _slug('-'.join(tags))
+
+
+def _infer_dataset(model_args, paths):
+    joined = ' '.join(paths).lower()
+    match = re.search(r'ntu[-_]?rgbd?[-_]?(\d+)|ntu(\d+)', joined)
+    if match:
+        return 'ntu{}'.format(match.group(1) or match.group(2))
+
+    num_class = model_args.get('num_class')
+    if num_class in (60, 120):
+        return 'ntu{}'.format(num_class)
+    return 'dataset'
+
+
+def _infer_split(paths):
+    joined = ' '.join(paths).lower()
+    if re.search(r'(^|[\\/_.-])xview($|[\\/_.-])', joined):
+        return 'xview'
+    if re.search(r'(^|[\\/_.-])xsub($|[\\/_.-])', joined):
+        return 'xsubject'
+    if 'xsubject' in joined:
+        return 'xsubject'
+    return None
+
+
+def _infer_frame_count(paths):
+    for value in paths:
+        match = re.search(r'frame[_-]?(\d+)|frame(\d+)', value.lower())
+        if match:
+            return match.group(1) or match.group(2)
+    return None
+
+
+def _infer_geometry_impl(arg):
+    haystack = ' '.join([
+        str(getattr(arg, 'config', '') or ''),
+        str(getattr(arg, 'model', '') or ''),
+        str(getattr(arg, 'processor', '') or ''),
+    ]).lower()
+
+    if 'eucl' in haystack:
+        return None
+    if 'hyptorch' in haystack:
+        return 'hyptorch'
+    if 'skeletonclr' in haystack or 'crossclr' in haystack:
+        return 'geoopt'
+    return None
+
+
+def _infer_scheduler_tag(arg):
+    return 'cosine' if _as_bool(getattr(arg, 'cosine_annealing', False)) else 'no-cosine'
+
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+    return bool(value)
+
+
+def _config_arg_strings(arg):
+    values = [
+        getattr(arg, 'config', ''),
+        getattr(arg, 'model', ''),
+    ]
+    return [str(value) for value in values if value is not None]
+
+
+def _feeder_arg_strings(arg):
+    values = []
+    for attr in ('train_feeder_args', 'test_feeder_args'):
+        feeder_args = getattr(arg, attr, None) or {}
+        if isinstance(feeder_args, dict):
+            values.extend(str(value) for value in feeder_args.values())
+    return [str(value) for value in values if value is not None]
+
+
+def _format_value(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    if number.is_integer():
+        return str(int(number))
+    return ('{:.8g}'.format(number)).replace('.', 'p').replace('-', 'm')
+
+
+def _slug(value):
+    value = re.sub(r'[^A-Za-z0-9_.-]+', '-', value).strip('.-')
+    value = re.sub(r'-+', '-', value)
+    return value.lower()

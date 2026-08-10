@@ -20,7 +20,12 @@ from torchlight import DictAction
 from torchlight import import_class
 
 from .io import IO
-from .work_dir import WORK_DIR_MODES, prepare_training_work_dir
+from .work_dir import (
+    WORK_DIR_LAYOUTS,
+    WORK_DIR_MODES,
+    build_canonical_work_dir,
+    prepare_training_work_dir,
+)
 from tensorboardX import SummaryWriter
 
 
@@ -64,6 +69,11 @@ class Processor(IO):
             return
 
         requested_work_dir = self.arg.work_dir
+        if self.arg.work_dir_layout == 'canonical' and self.arg.work_dir_mode != 'resume':
+            self.arg.work_dir = build_canonical_work_dir(
+                self.arg,
+                processor_name=self.__class__.__name__)
+
         self.arg.work_dir = prepare_training_work_dir(
             self.arg.work_dir,
             mode=self.arg.work_dir_mode,
@@ -265,6 +275,8 @@ class Processor(IO):
 
         parser.add_argument('-w', '--work_dir', default='./work_dir/tmp', help='the work folder for storing results')
         parser.add_argument('-c', '--config', default=None, help='path to the configuration file')
+        parser.add_argument('--work_dir_layout', default='canonical', choices=WORK_DIR_LAYOUTS,
+                            help='canonical derives the experiment directory from run arguments; manual uses work_dir as given')
         parser.add_argument('--work_dir_mode', default='auto', choices=WORK_DIR_MODES,
                             help='auto creates a unique run directory; error fails if work_dir exists; resume uses work_dir exactly')
         parser.add_argument('--run_id', default=None,
