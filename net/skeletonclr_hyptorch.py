@@ -2,16 +2,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlight import import_class
-# HYP: libraries
-import geoopt as gt
-#import geoopt.manifolds.stereographic.math as pmath 
 
 import tools.hyptorch.pmath as pmath
 
 import tools.hyptorch.nn as hypnn
 
-class SkeletonCLR_HCL(nn.Module):
-    """ Referring to the code of MOCO, https://arxiv.org/abs/1911.05722 """
+class SkeletonCLRHyptorch(nn.Module):
+    """
+    Hyptorch-based SkeletonCLR variant.
+
+    This is an alternative implementation of the same MoCo-style hyperbolic
+    contrastive setup. The currently used SkeletonCLR path uses geoopt.
+    """
 
     def __init__(self, base_encoder=None, pretrain=True, feature_dim=128, queue_size=32768,
                  momentum=0.999, Temperature=0.07, mlp=True, in_channels=3, hidden_channels=64,
