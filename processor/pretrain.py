@@ -13,6 +13,7 @@ from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
     CosineAnnealingWarmRestarts,
     ExponentialLR,
+    LambdaLR,
     LinearLR,
     MultiStepLR,
     SequentialLR,
@@ -55,9 +56,9 @@ def add_lr_scheduler_args(parser):
     parser.add_argument('--lr_warmup_start_factor', type=float, default=0.001,
                         help='initial LR factor for LinearLR warmup')
     parser.add_argument('--lr_eta_min', type=float, default=None,
-                        help='minimum learning rate for cosine schedulers; null defaults to 0.1 * base_lr')
+                        help='minimum learning rate for cosine schedulers; null defaults to 0.01 * base_lr')
     parser.add_argument('--lr_t_max', type=int, default=None,
-                        help='T_max for CosineAnnealingLR; defaults to num_epoch - lr_warmup_epochs')
+                        help='T_max for CosineAnnealingLR; null defaults to min(50, num_epoch - lr_warmup_epochs)')
     parser.add_argument('--lr_t_0', type=int, default=10,
                         help='initial cycle length for CosineAnnealingWarmRestarts')
     parser.add_argument('--lr_t_mult', type=int, default=1,
@@ -175,14 +176,24 @@ class PT_Processor(Processor):
             )
 
         if scheduler_name == 'cosine':
-            t_max = getattr(self.arg, 'lr_t_max', None)
-            if t_max is None:
-                t_max = int(self.arg.num_epoch) - warmup_epochs
-            t_max = max(1, int(t_max))
-            return CosineAnnealingLR(
+            eta_min = self._lr_eta_min()
+            t_max = self._lr_t_max(warmup_epochs)
+            scheduler = CosineAnnealingLR(
                 self.optimizer,
                 T_max=t_max,
-                eta_min=self._lr_eta_min(),
+                eta_min=eta_min,
+            )
+            schedule_epochs = self._lr_schedule_epochs(warmup_epochs)
+            if t_max >= schedule_epochs:
+                return scheduler
+            eta_min_factor = eta_min / float(self.arg.base_lr)
+            return SequentialLR(
+                self.optimizer,
+                schedulers=[
+                    scheduler,
+                    LambdaLR(self.optimizer, lr_lambda=lambda _: eta_min_factor),
+                ],
+                milestones=[t_max],
             )
 
         if scheduler_name == 'cosine_warm_restarts':
@@ -219,8 +230,17 @@ class PT_Processor(Processor):
     def _lr_eta_min(self):
         eta_min = getattr(self.arg, 'lr_eta_min', None)
         if eta_min is None:
-            return float(self.arg.base_lr) * 0.1
+            return float(self.arg.base_lr) * 0.01
         return float(eta_min)
+
+    def _lr_t_max(self, warmup_epochs):
+        t_max = getattr(self.arg, 'lr_t_max', None)
+        if t_max is not None:
+            return max(1, int(t_max))
+        return min(50, self._lr_schedule_epochs(warmup_epochs))
+
+    def _lr_schedule_epochs(self, warmup_epochs):
+        return max(1, int(self.arg.num_epoch) - warmup_epochs)
 
     def train(self, epoch):
         self.model.train()
