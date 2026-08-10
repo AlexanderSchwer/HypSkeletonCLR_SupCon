@@ -233,6 +233,12 @@ class SkeletonCLR_Att_Processor(PT_Processor):
         # region arguments yapf: disable
         parser.add_argument('--base_lr', type=float, default=0.01, help='initial learning rate')
         parser.add_argument('--step', type=int, default=[], nargs='+', help='the epoch where optimizer reduce the learning rate')
+        parser.add_argument('--cosine_annealing', type=str2bool, default=False,
+                            help='use linear warmup plus cosine annealing instead of step learning-rate decay')
+        parser.add_argument('--cosine_warmup_epochs', type=int, default=15,
+                            help='number of linear warmup epochs before cosine annealing')
+        parser.add_argument('--cosine_eta_min', type=float, default=0.0,
+                            help='minimum learning rate for cosine annealing')
         parser.add_argument('--optimizer', default='SGD', help='type of optimizer')
         parser.add_argument('--nesterov', type=str2bool, default=True, help='use nesterov or not')
         parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight decay for optimizer')
