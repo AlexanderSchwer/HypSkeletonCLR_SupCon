@@ -191,6 +191,9 @@ class Processor(IO):
         self.eval_info['test_mean_loss'] = 1
         self.show_eval_info()
 
+    def after_train_epoch(self, epoch):
+        pass
+
     def print_networks(self, net, print_flag=False):
         self.io.print_log('---------- Networks initialized -------------')
         num_params = 0
@@ -217,6 +220,7 @@ class Processor(IO):
                 # training
                 self.io.print_log('Training epoch: {}'.format(epoch + 1))
                 self.train(epoch + 1)
+                self.after_train_epoch(epoch + 1)
 
                 # save model
                 if self.arg.save_interval == -1:

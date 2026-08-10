@@ -238,15 +238,16 @@ def _infer_geometry_impl(arg):
 
 
 def _infer_scheduler_tag(arg):
-    return 'cosine' if _as_bool(getattr(arg, 'cosine_annealing', False)) else 'no-cosine'
-
-
-def _as_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ('1', 'true', 'yes', 'y', 'on')
-    return bool(value)
+    scheduler = str(getattr(arg, 'lr_scheduler', 'auto') or 'auto').lower()
+    scheduler = scheduler.replace('-', '_')
+    if scheduler == 'auto':
+        if getattr(arg, 'lr_milestones', None) or getattr(arg, 'step', None):
+            scheduler = 'multistep'
+        else:
+            scheduler = 'none'
+    if scheduler == 'none':
+        return 'constant-lr'
+    return scheduler.replace('_', '-')
 
 
 def _config_arg_strings(arg):

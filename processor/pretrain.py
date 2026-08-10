@@ -3,13 +3,21 @@
 import sys
 import argparse
 import yaml
-import math
 import numpy as np
 
 # torch
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import (
+    CosineAnnealingLR,
+    CosineAnnealingWarmRestarts,
+    ExponentialLR,
+    LinearLR,
+    MultiStepLR,
+    SequentialLR,
+    StepLR,
+)
 
 # torchlight
 import torchlight
@@ -20,6 +28,41 @@ from torchlight import import_class
 from .processor import Processor
 
 import geoopt as gt
+
+
+LR_SCHEDULERS = (
+    'auto',
+    'none',
+    'multistep',
+    'step',
+    'exponential',
+    'cosine',
+    'cosine_warm_restarts',
+)
+
+
+def add_lr_scheduler_args(parser):
+    parser.add_argument('--lr_scheduler', default='auto', choices=LR_SCHEDULERS,
+                        help='learning-rate scheduler: auto maps step to multistep')
+    parser.add_argument('--lr_milestones', type=int, default=[], nargs='+',
+                        help='epoch milestones for MultiStepLR; defaults to step when empty')
+    parser.add_argument('--lr_step_size', type=int, default=250,
+                        help='step size in epochs for StepLR')
+    parser.add_argument('--lr_gamma', type=float, default=0.1,
+                        help='multiplicative decay factor for StepLR, MultiStepLR, and ExponentialLR')
+    parser.add_argument('--lr_warmup_epochs', type=int, default=0,
+                        help='linear warmup epochs before the selected scheduler')
+    parser.add_argument('--lr_warmup_start_factor', type=float, default=0.001,
+                        help='initial LR factor for LinearLR warmup')
+    parser.add_argument('--lr_eta_min', type=float, default=None,
+                        help='minimum learning rate for cosine schedulers; null defaults to 0.1 * base_lr')
+    parser.add_argument('--lr_t_max', type=int, default=None,
+                        help='T_max for CosineAnnealingLR; defaults to num_epoch - lr_warmup_epochs')
+    parser.add_argument('--lr_t_0', type=int, default=10,
+                        help='initial cycle length for CosineAnnealingWarmRestarts')
+    parser.add_argument('--lr_t_mult', type=int, default=1,
+                        help='cycle length multiplier for CosineAnnealingWarmRestarts')
+
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -66,49 +109,118 @@ class PT_Processor(Processor):
                 weight_decay=self.arg.weight_decay)
         else:
             raise ValueError()
+        self.lr_scheduler = self._build_lr_scheduler()
+        self.lr = self._current_lr()
         
     def adjust_lr_scheduler(self):
-        lr = self._cosine_annealed_lr()
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        self.lr = lr
+        self.adjust_lr()
 
     def adjust_lr(self):
-        if getattr(self.arg, 'cosine_annealing', False):
-            self.adjust_lr_scheduler()
-            return
+        self.lr = self._current_lr()
 
-        if self.arg.optimizer == 'SGD' and self.arg.step:
-            lr = self.arg.base_lr * (
-                0.1**np.sum(self.meta_info['epoch'] > np.array(self.arg.step)))
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
-            self.lr = lr
-        elif self.arg.optimizer == 'RSGD' and self.arg.step:
-            lr = self.arg.base_lr * (
-                0.1**np.sum(self.meta_info['epoch'] > np.array(self.arg.step)))
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
-            self.lr = lr
-        else:
-            self.lr = self.arg.base_lr
+    def after_train_epoch(self, epoch):
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
 
-    def _cosine_annealed_lr(self):
-        base_lr = float(self.arg.base_lr)
-        eta_min = float(self.arg.cosine_eta_min)
-        total_epochs = max(1, int(self.arg.num_epoch))
-        warmup_epochs = max(0, int(self.arg.cosine_warmup_epochs))
-        current_epoch = max(1, int(self.meta_info['epoch']))
+    def _current_lr(self):
+        return self.optimizer.param_groups[0]['lr']
 
-        if warmup_epochs > 0 and current_epoch <= warmup_epochs:
-            return base_lr * current_epoch / warmup_epochs
+    def _build_lr_scheduler(self):
+        scheduler_name = self._lr_scheduler_name()
+        warmup_epochs = max(0, int(getattr(self.arg, 'lr_warmup_epochs', 0)))
+        main_scheduler = self._build_main_lr_scheduler(scheduler_name, warmup_epochs)
 
-        annealing_epochs = max(1, total_epochs - warmup_epochs)
-        progress_denominator = max(1, annealing_epochs - 1)
-        progress = (current_epoch - warmup_epochs - 1) / progress_denominator
-        progress = min(max(progress, 0.0), 1.0)
-        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return eta_min + (base_lr - eta_min) * cosine
+        if warmup_epochs == 0:
+            return main_scheduler
+
+        warmup = LinearLR(
+            self.optimizer,
+            start_factor=float(self.arg.lr_warmup_start_factor),
+            total_iters=warmup_epochs,
+        )
+        if main_scheduler is None:
+            return warmup
+        return SequentialLR(
+            self.optimizer,
+            schedulers=[warmup, main_scheduler],
+            milestones=[warmup_epochs],
+        )
+
+    def _build_main_lr_scheduler(self, scheduler_name, warmup_epochs):
+        if scheduler_name == 'none':
+            return None
+
+        if scheduler_name == 'multistep':
+            milestones = self._lr_milestones(warmup_epochs)
+            if not milestones:
+                return None
+            return MultiStepLR(
+                self.optimizer,
+                milestones=milestones,
+                gamma=float(self.arg.lr_gamma),
+            )
+
+        if scheduler_name == 'step':
+            step_size = max(1, int(self.arg.lr_step_size))
+            return StepLR(
+                self.optimizer,
+                step_size=step_size,
+                gamma=float(self.arg.lr_gamma),
+            )
+
+        if scheduler_name == 'exponential':
+            return ExponentialLR(
+                self.optimizer,
+                gamma=float(self.arg.lr_gamma),
+            )
+
+        if scheduler_name == 'cosine':
+            t_max = getattr(self.arg, 'lr_t_max', None)
+            if t_max is None:
+                t_max = int(self.arg.num_epoch) - warmup_epochs
+            t_max = max(1, int(t_max))
+            return CosineAnnealingLR(
+                self.optimizer,
+                T_max=t_max,
+                eta_min=self._lr_eta_min(),
+            )
+
+        if scheduler_name == 'cosine_warm_restarts':
+            return CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=max(1, int(self.arg.lr_t_0)),
+                T_mult=max(1, int(self.arg.lr_t_mult)),
+                eta_min=self._lr_eta_min(),
+            )
+
+        raise ValueError('Unknown lr_scheduler: {}'.format(scheduler_name))
+
+    def _lr_scheduler_name(self):
+        scheduler_name = str(getattr(self.arg, 'lr_scheduler', 'auto')).lower()
+        scheduler_name = scheduler_name.replace('-', '_')
+
+        if scheduler_name == 'auto':
+            if getattr(self.arg, 'step', None):
+                return 'multistep'
+            return 'none'
+
+        if scheduler_name not in LR_SCHEDULERS:
+            raise ValueError('Unknown lr_scheduler: {}'.format(scheduler_name))
+        return scheduler_name
+
+    def _lr_milestones(self, warmup_epochs):
+        milestones = list(getattr(self.arg, 'lr_milestones', None) or [])
+        if not milestones:
+            milestones = list(getattr(self.arg, 'step', None) or [])
+        if warmup_epochs == 0:
+            return [int(value) for value in milestones]
+        return [max(1, int(value) - warmup_epochs) for value in milestones if int(value) > warmup_epochs]
+
+    def _lr_eta_min(self):
+        eta_min = getattr(self.arg, 'lr_eta_min', None)
+        if eta_min is None:
+            return float(self.arg.base_lr) * 0.1
+        return float(eta_min)
 
     def train(self, epoch):
         self.model.train()
@@ -157,12 +269,7 @@ class PT_Processor(Processor):
         # region arguments yapf: disable
         parser.add_argument('--base_lr', type=float, default=0.01, help='initial learning rate')
         parser.add_argument('--step', type=int, default=[], nargs='+', help='the epoch where optimizer reduce the learning rate')
-        parser.add_argument('--cosine_annealing', type=str2bool, default=False,
-                            help='use linear warmup plus cosine annealing instead of step learning-rate decay')
-        parser.add_argument('--cosine_warmup_epochs', type=int, default=15,
-                            help='number of linear warmup epochs before cosine annealing')
-        parser.add_argument('--cosine_eta_min', type=float, default=0.0,
-                            help='minimum learning rate for cosine annealing')
+        add_lr_scheduler_args(parser)
         parser.add_argument('--optimizer', default='SGD', help='type of optimizer')
         parser.add_argument('--nesterov', type=str2bool, default=True, help='use nesterov or not')
         parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight decay for optimizer')

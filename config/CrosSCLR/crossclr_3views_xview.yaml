@@ -34,7 +34,11 @@ nesterov: False
 weight_decay: 1e-4
 base_lr: 0.1
 optimizer: SGD
-step: [250]
+lr_scheduler: cosine
+lr_warmup_epochs: 0
+lr_warmup_start_factor: 0.001
+lr_eta_min: null  # defaults to 0.1 * base_lr
+lr_t_max: null
 
 # training
 device: [0]

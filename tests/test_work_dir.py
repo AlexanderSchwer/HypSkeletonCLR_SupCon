@@ -61,7 +61,6 @@ class TrainingWorkDirTest(unittest.TestCase):
             test_feeder_args={},
             base_lr=0.05,
             step=[250],
-            cosine_annealing=False,
         )
 
         resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_Processor')
@@ -70,7 +69,7 @@ class TrainingWorkDirTest(unittest.TestCase):
             resolved,
             os.path.normpath(
                 'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
-                'geoopt-c1-clust5-lrb0p05-no-cosine'))
+                'geoopt-c1-clust5-lrb0p05-multistep'))
 
     def test_canonical_uses_xsubject_for_xsub_dataset(self):
         arg = Namespace(
@@ -82,7 +81,6 @@ class TrainingWorkDirTest(unittest.TestCase):
             test_feeder_args={},
             base_lr=0.05,
             step=[250],
-            cosine_annealing=False,
         )
 
         resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_Processor')
@@ -101,7 +99,6 @@ class TrainingWorkDirTest(unittest.TestCase):
             test_feeder_args={},
             base_lr=0.05,
             step=[250],
-            cosine_annealing=False,
         )
 
         resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_Processor')
@@ -110,7 +107,7 @@ class TrainingWorkDirTest(unittest.TestCase):
             resolved,
             os.path.normpath(
                 'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
-                'hyptorch-c1-lrb0p05-no-cosine'))
+                'hyptorch-c1-lrb0p05-multistep'))
 
     def test_canonical_omits_geometry_and_curvature_for_euclidean_run(self):
         arg = Namespace(
@@ -122,7 +119,6 @@ class TrainingWorkDirTest(unittest.TestCase):
             test_feeder_args={},
             base_lr=0.05,
             step=[250],
-            cosine_annealing=False,
         )
 
         resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_Processor')
@@ -131,7 +127,7 @@ class TrainingWorkDirTest(unittest.TestCase):
             resolved,
             os.path.normpath(
                 'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
-                'lrb0p05-no-cosine'))
+                'lrb0p05-multistep'))
 
     def test_canonical_preserves_absolute_work_dir_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -145,7 +141,6 @@ class TrainingWorkDirTest(unittest.TestCase):
                 test_feeder_args={},
                 base_lr=0.05,
                 step=[250],
-                cosine_annealing=False,
             )
 
             resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_Processor')
@@ -156,9 +151,9 @@ class TrainingWorkDirTest(unittest.TestCase):
                     root,
                     'skeletonclr',
                     'ntu60-xview-frame50-hc16',
-                    'geoopt-c1-lrb0p05-no-cosine'))
+                    'geoopt-c1-lrb0p05-multistep'))
 
-    def test_canonical_uses_cosine_tag_when_cosine_flag_is_enabled(self):
+    def test_canonical_uses_cosine_tag_when_cosine_scheduler_is_enabled(self):
         arg = Namespace(
             work_dir='work_dir/skeletonclr',
             config='config/SkeletonCLR/skeletonclr_xview.yaml',
@@ -168,7 +163,7 @@ class TrainingWorkDirTest(unittest.TestCase):
             test_feeder_args={},
             base_lr=0.05,
             step=[250],
-            cosine_annealing=True,
+            lr_scheduler='cosine',
         )
 
         resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_Processor')
@@ -178,6 +173,27 @@ class TrainingWorkDirTest(unittest.TestCase):
             os.path.normpath(
                 'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
                 'geoopt-c1-lrb0p05-cosine'))
+
+    def test_canonical_uses_constant_lr_tag_when_scheduler_is_none(self):
+        arg = Namespace(
+            work_dir='work_dir/skeletonclr',
+            config='config/SkeletonCLR/skeletonclr_xview.yaml',
+            model='net.skeletonclr.SkeletonCLR',
+            model_args={'num_class': 60, 'hidden_channels': 16, 'curvature': 1.0},
+            train_feeder_args={'data_path': './data/ntu60/xview/train_data_joint_frame50.npy'},
+            test_feeder_args={},
+            base_lr=0.05,
+            step=[],
+            lr_scheduler='none',
+        )
+
+        resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_Processor')
+
+        self.assertEqual(
+            resolved,
+            os.path.normpath(
+                'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
+                'geoopt-c1-lrb0p05-constant-lr'))
 
 
 if __name__ == '__main__':
