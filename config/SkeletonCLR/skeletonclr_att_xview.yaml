@@ -36,7 +36,7 @@ model_args:
 # optim
 nesterov: True
 weight_decay: 1e-4
-base_lr: 0.01
+base_lr: 0.1
 optimizer: SGD
 lr_scheduler: cosine
 lr_warmup_epochs: 0
