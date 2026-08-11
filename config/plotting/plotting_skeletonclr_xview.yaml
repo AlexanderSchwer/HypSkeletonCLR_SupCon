@@ -42,6 +42,28 @@ start_epoch: 0
 
 view: 'joint'
 
+# plotting
+plot_methods: [tsne, hyp_tsne]
+plot_selected_labels: [5, 11, 13, 14, 25, 27, 39, 42, 50, 54]
+plot_color_by: [class_group, class]
+plot_class_groups:
+  object_interaction: [5, 11, 25, 27]
+  dressing: [13, 14]
+  gesture: [39]
+  falling_posture: [42]
+  interpersonal: [50, 54]
+plot_class_names:
+  5: "pickup"
+  11: "writing"
+  13: "wear jacket"
+  14: "take off jacket"
+  25: "hopping"
+  27: "phone call"
+  39: "cross hands"
+  42: "falling"
+  50: "kicking other person"
+  54: "hugging other person"
+
 # log
 save_interval: 5
 eval_interval: -1

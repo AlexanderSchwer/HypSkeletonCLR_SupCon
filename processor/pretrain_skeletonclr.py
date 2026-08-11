@@ -31,6 +31,7 @@ from tools.hyperbolic_hierarchy import (
 )
 from tools.hyperbolic_embedding_plot import (
     DEFAULT_NEGATIVE_DISTANCE_SAMPLES,
+    default_hierarchy_plot_classes,
     render_embedding_diagnostics,
 )
 
@@ -84,6 +85,10 @@ class SkeletonCLR_Processor(PT_Processor):
                     "embedding_plot_interval": self.arg.embedding_plot_interval,
                     "embedding_plot_max_samples": self.arg.embedding_plot_max_samples,
                     "embedding_plot_methods": self.arg.embedding_plot_methods,
+                    "embedding_plot_selected_labels": self.arg.embedding_plot_selected_labels,
+                    "embedding_plot_color_by": self.arg.embedding_plot_color_by,
+                    "embedding_plot_class_groups": self.arg.embedding_plot_class_groups,
+                    "embedding_plot_class_names": self.arg.embedding_plot_class_names,
                 })
             except Exception as exc:
                 self._wandb_ok = False
@@ -343,7 +348,11 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--wandb_disabled', type=str2bool, default=False, help='disable W&B init, logging, finishing, and sync completely')
         parser.add_argument('--embedding_plot_interval', type=int, default=0, help='render embedding diagnostic plots every N epochs; 0 disables live plotting')
         parser.add_argument('--embedding_plot_max_samples', type=int, default=1024, help='maximum epoch samples retained for each embedding plot')
-        parser.add_argument('--embedding_plot_methods', default=['logmap_pca_disk', 'hyp_tsne'], nargs='+', help='projection methods: logmap_pca, logmap_pca_disk, logmap_tsne, hyp_tsne')
+        parser.add_argument('--embedding_plot_methods', default=['logmap_pca_disk', 'hyp_tsne'], nargs='+', help='projection methods: pca, svd, tsne, logmap_pca, logmap_pca_disk, logmap_tsne, hyp_tsne')
+        parser.add_argument('--embedding_plot_selected_labels', type=int, default=[], nargs='+', help='class labels to plot in embedding diagnostics; use -1 for all classes; empty uses hierarchy defaults')
+        parser.add_argument('--embedding_plot_color_by', default=['class_group'], nargs='+', choices=['class', 'class_group'], help='color embedding diagnostics by one or more modes: class or class_group')
+        parser.add_argument('--embedding_plot_class_groups', action=DictAction, default=dict(), help='mapping from group names to class-label lists')
+        parser.add_argument('--embedding_plot_class_names', action=DictAction, default=dict(), help='mapping from class labels to semantic class names')
         
         # endregion yapf: enable
 
@@ -510,6 +519,8 @@ class SkeletonCLR_Processor(PT_Processor):
             "max_samples": max(0, int(self.arg.embedding_plot_max_samples)),
             "max_negatives": max_negatives,
             "negatives_per_batch": negatives_per_batch,
+            "dataset_size": self._loader_dataset_size(loader),
+            "split_name": "train",
         }
 
     def _accumulate_embedding_snapshot(self, snapshot, features_sup, label, output):
@@ -585,6 +596,11 @@ class SkeletonCLR_Processor(PT_Processor):
             return [method.strip() for method in methods.split(",") if method.strip()]
         return list(methods)
 
+    def _embedding_plot_selected_labels(self):
+        if not self.arg.embedding_plot_selected_labels:
+            return default_hierarchy_plot_classes()
+        return self.arg.embedding_plot_selected_labels
+
     def _render_embedding_snapshot(self, epoch, snapshot):
         if not snapshot["embeddings"]:
             print(f"Skipping embedding diagnostics for epoch {epoch}: no samples collected.")
@@ -615,6 +631,12 @@ class SkeletonCLR_Processor(PT_Processor):
                 positive_distances=positive_distances,
                 negative_distances=negative_distances,
                 projection_methods=self._embedding_plot_methods(),
+                selected_labels=self._embedding_plot_selected_labels(),
+                color_by=self.arg.embedding_plot_color_by,
+                class_groups=self.arg.embedding_plot_class_groups,
+                class_names=self.arg.embedding_plot_class_names,
+                dataset_size=snapshot.get("dataset_size"),
+                split_name=snapshot.get("split_name"),
             )
         except Exception as exc:
             print(f"Embedding diagnostics failed for epoch {epoch}: {exc}")
@@ -634,6 +656,13 @@ class SkeletonCLR_Processor(PT_Processor):
             key = os.path.splitext(os.path.basename(path))[0]
             payload[f"embedding_diagnostics/{key}"] = wandb.Image(path)
         self._safe_wandb_log(payload, step=self.global_step)
+
+    @staticmethod
+    def _loader_dataset_size(loader):
+        try:
+            return len(loader.dataset)
+        except (AttributeError, TypeError):
+            return None
 
     def _safe_wandb_log(self, data, step=None):
         if not self._wandb_ok:

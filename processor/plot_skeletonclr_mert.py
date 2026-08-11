@@ -2,6 +2,7 @@
 # pylint: disable=W0201
 import sys
 import argparse
+import os
 
 #from hyperbolicTSNE import SequentialOptimizer, initialization, HyperbolicTSNE
 #from hyperbolicTSNE import hd_mat_ as hd_mat
@@ -24,7 +25,7 @@ from torchlight import DictAction
 from torchlight import import_class
 
 from .processor import Processor
-from .pretrain import PT_Processor
+from .pretrain import PT_Processor, add_lr_scheduler_args
 
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.manifold import TSNE
@@ -87,7 +88,9 @@ class SkeletonCLR_Plotting(PT_Processor):
         emb = tsne.fit_transform(feats)
 
         print("Generating plots with model output features...")
-        save_path_tsne = f"latent_space_tsne_mert.png"
+        output_dir = os.path.join(self.arg.work_dir, "embedding_plots")
+        os.makedirs(output_dir, exist_ok=True)
+        save_path_tsne = os.path.join(output_dir, "latent_space_tsne_mert.png")
 
         plt.figure(figsize=(8, 6))
         scatter = plt.scatter(emb[:, 0], emb[:, 1], c=labs, cmap='tab20', s=5)
@@ -114,6 +117,7 @@ class SkeletonCLR_Plotting(PT_Processor):
         # region arguments yapf: disable
         parser.add_argument('--base_lr', type=float, default=0.01, help='initial learning rate')
         parser.add_argument('--step', type=int, default=[], nargs='+', help='the epoch where optimizer reduce the learning rate')
+        add_lr_scheduler_args(parser)
         parser.add_argument('--optimizer', default='SGD', help='type of optimizer')
         parser.add_argument('--nesterov', type=str2bool, default=True, help='use nesterov or not')
         parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight decay for optimizer')
