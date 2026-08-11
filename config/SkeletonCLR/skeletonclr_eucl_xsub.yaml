@@ -38,10 +38,10 @@ weight_decay: 1e-4
 base_lr: 0.1
 optimizer: SGD
 lr_scheduler: cosine
-lr_warmup_epochs: 0
+lr_warmup_epochs: 15
 lr_warmup_start_factor: 0.001
-lr_eta_min: null  # defaults to 0.01 * base_lr
-lr_t_max: null  # defaults to min(50, num_epoch - lr_warmup_epochs)
+lr_eta_min: 0.0
+lr_t_max: 285
 
 # training
 device: [0]
