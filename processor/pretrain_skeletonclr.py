@@ -653,9 +653,17 @@ class SkeletonCLR_Processor(PT_Processor):
             return
         payload = {}
         for path in paths:
-            key = os.path.splitext(os.path.basename(path))[0]
+            key = self._wandb_image_series_key(path)
             payload[f"embedding_diagnostics/{key}"] = wandb.Image(path)
         self._safe_wandb_log(payload, step=self.global_step)
+
+    @staticmethod
+    def _wandb_image_series_key(path):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        parts = stem.split("_")
+        if len(parts) >= 3 and parts[0] == "epoch" and parts[1].isdigit():
+            return "_".join(parts[2:])
+        return stem
 
     @staticmethod
     def _loader_dataset_size(loader):
