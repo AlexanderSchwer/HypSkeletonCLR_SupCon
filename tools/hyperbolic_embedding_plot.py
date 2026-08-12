@@ -569,37 +569,93 @@ def _title_with_metadata(title, metadata_text):
 
 
 def _plot_radius_histograms(embeddings, centroids, curvature, epoch, save_path, metadata_text=None):
-    sample_norm = np.linalg.norm(embeddings, axis=1)
-    sample_depth = _dist0(embeddings, curvature)
+    sample_norm = _finite_1d(np.linalg.norm(embeddings, axis=1))
+    sample_depth = _finite_1d(_dist0(embeddings, curvature))
 
     centroid_norm = None
     centroid_depth = None
     if centroids is not None and centroids.size > 0:
-        centroid_norm = np.linalg.norm(centroids, axis=1)
-        centroid_depth = _dist0(centroids, curvature)
+        centroid_norm = _finite_1d(np.linalg.norm(centroids, axis=1))
+        centroid_depth = _finite_1d(_dist0(centroids, curvature))
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
-    axes[0].hist(sample_norm, bins=40, alpha=0.75, label="embeddings", color="#4C78A8")
+    ball_radius = _ball_radius(curvature)
+    norm_bins = np.linspace(0.0, ball_radius, 41)
+    axes[0].hist(
+        sample_norm,
+        bins=norm_bins,
+        alpha=0.78,
+        label=f"embeddings (n={sample_norm.size})",
+        color="#4C78A8",
+        edgecolor="#1F4E79",
+        linewidth=0.35,
+    )
     if centroid_norm is not None:
-        axes[0].hist(centroid_norm, bins=25, alpha=0.55, label="centroids", color="#F58518")
-    axes[0].axvline(_ball_radius(curvature), color="#222222", linestyle="--", linewidth=1.0, label="ball boundary")
+        _draw_centroid_markers(axes[0], centroid_norm)
+    axes[0].axvline(ball_radius, color="#222222", linestyle="--", linewidth=1.0, label="ball boundary")
+    axes[0].set_xlim(0.0, ball_radius * 1.02)
     axes[0].set_title("Euclidean radius in Poincare ball")
     axes[0].set_xlabel("||x||")
     axes[0].set_ylabel("Count")
+    axes[0].grid(True, color="#d9d9d9", linewidth=0.5, alpha=0.6)
     axes[0].legend(frameon=False)
 
-    axes[1].hist(sample_depth, bins=40, alpha=0.75, label="embeddings", color="#4C78A8")
+    depth_values = sample_depth
     if centroid_depth is not None:
-        axes[1].hist(centroid_depth, bins=25, alpha=0.55, label="centroids", color="#F58518")
+        depth_values = np.concatenate([sample_depth, centroid_depth])
+    depth_upper = _positive_axis_upper(depth_values)
+    depth_bins = np.linspace(0.0, depth_upper, 41)
+    axes[1].hist(
+        sample_depth,
+        bins=depth_bins,
+        alpha=0.78,
+        label=f"embeddings (n={sample_depth.size})",
+        color="#4C78A8",
+        edgecolor="#1F4E79",
+        linewidth=0.35,
+    )
+    if centroid_depth is not None:
+        _draw_centroid_markers(axes[1], centroid_depth)
+    axes[1].set_xlim(0.0, depth_upper)
     axes[1].set_title("Hyperbolic radius from origin")
     axes[1].set_xlabel("d_H(0, x)")
     axes[1].set_ylabel("Count")
+    axes[1].grid(True, color="#d9d9d9", linewidth=0.5, alpha=0.6)
     axes[1].legend(frameon=False)
 
     fig.suptitle(_title_with_metadata(f"Epoch {epoch} - radius diagnostics", metadata_text))
     fig.tight_layout()
     fig.savefig(save_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
+
+
+def _draw_centroid_markers(ax, values, color="#F58518", max_labels=30):
+    values = _finite_1d(values)
+    for index, value in enumerate(values):
+        label = "centroids" if index == 0 else None
+        ax.axvline(value, color=color, linewidth=1.2, alpha=0.9, label=label)
+        if index < max_labels:
+            ax.text(
+                value,
+                0.98,
+                f"c{index}",
+                transform=ax.get_xaxis_transform(),
+                rotation=90,
+                va="top",
+                ha="right",
+                fontsize=7,
+                color=color,
+            )
+
+
+def _positive_axis_upper(values, fallback=1.0, padding=1.05):
+    values = _finite_1d(values)
+    if values.size == 0:
+        return fallback
+    upper = float(np.max(values))
+    if upper <= 0:
+        return fallback
+    return upper * padding
 
 
 def _plot_distance_histograms(
