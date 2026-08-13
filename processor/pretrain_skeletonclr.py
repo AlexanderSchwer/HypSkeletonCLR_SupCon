@@ -80,6 +80,8 @@ class SkeletonCLR_Processor(PT_Processor):
                     "lambda_hier": self.arg.lambda_hier,
                     "cluster_warmup_steps": self.arg.cluster_warmup_steps,
                     "cluster_ramp_steps": self.arg.cluster_ramp_steps,
+                    "cluster_distance_log_interval": self.arg.cluster_distance_log_interval,
+                    "cluster_distance_matrix_max_clusters": self.arg.cluster_distance_matrix_max_clusters,
                     "hier_warmup_steps": self.arg.hier_warmup_steps,
                     "hier_ramp_steps": self.arg.hier_ramp_steps,
                     "embedding_plot_interval": self.arg.embedding_plot_interval,
@@ -109,6 +111,7 @@ class SkeletonCLR_Processor(PT_Processor):
         loss_value = []
         sink_loss_value = []
         hier_loss_value = []
+        cluster_distance_diagnostics = self._new_cluster_distance_diagnostics()
         embedding_snapshot = (
             self._new_embedding_snapshot(loader)
             if self._should_plot_embeddings(epoch)
@@ -218,6 +221,10 @@ class SkeletonCLR_Processor(PT_Processor):
 
             loss_base = loss
             loss_sink, loss_hier, cluster_metrics = self._compute_cluster_losses(cluster_pack)
+            self._accumulate_cluster_distance_diagnostics(
+                cluster_distance_diagnostics,
+                cluster_pack,
+            )
             sink_weight = self._ramp_weight(
                 self.arg.lambda_sink,
                 self.arg.cluster_warmup_steps,
@@ -307,6 +314,8 @@ class SkeletonCLR_Processor(PT_Processor):
             epoch_payload["train_mean_loss_hier"] = np.mean(hier_loss_value)
         self._safe_wandb_log(epoch_payload, step=self.global_step)
 
+        self._log_cluster_distance_diagnostics(epoch, cluster_distance_diagnostics)
+
         if embedding_snapshot is not None:
             self._render_embedding_snapshot(epoch, embedding_snapshot)
 
@@ -336,6 +345,8 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--lambda_sink', type=float, default=1.0, help='maximum weight for Sinkhorn clustering loss')
         parser.add_argument('--cluster_warmup_steps', type=int, default=1000, help='MoCo-only iterations before Sinkhorn loss')
         parser.add_argument('--cluster_ramp_steps', type=int, default=2000, help='iterations used to ramp Sinkhorn loss weight')
+        parser.add_argument('--cluster_distance_log_interval', type=int, default=1, help='log cluster distance diagnostics every N epochs; 0 disables')
+        parser.add_argument('--cluster_distance_matrix_max_clusters', type=int, default=20, help='maximum number of clusters for full inter-cluster distance matrix logging')
         parser.add_argument('--lambda_hier', type=float, default=0.1, help='maximum weight for hyperbolic hierarchy loss')
         parser.add_argument('--hier_update_interval', type=int, default=200, help='interval of iterations for hierarchy loss')
         parser.add_argument('--hier_warmup_steps', type=int, default=3000, help='warmup iterations before hierarchy loss')
@@ -474,6 +485,144 @@ class SkeletonCLR_Processor(PT_Processor):
             if hierarchy_triplet_accuracy is not None:
                 metrics["hierarchy_triplet_accuracy"] = hierarchy_triplet_accuracy
             return metrics
+
+    def _new_cluster_distance_diagnostics(self):
+        return {
+            "sample_count": 0,
+            "num_clusters": None,
+            "intra_sum": None,
+            "intra_sq_sum": None,
+            "intra_count": None,
+            "proto_h": None,
+        }
+
+    def _accumulate_cluster_distance_diagnostics(self, diagnostics, cluster_pack):
+        if diagnostics is None or cluster_pack is None:
+            return
+        dist_k_proto = cluster_pack.get("dist_k_proto", None)
+        assign_k = cluster_pack.get("assign_k", None)
+        proto_h = cluster_pack.get("proto_h", None)
+        if dist_k_proto is None or assign_k is None or proto_h is None:
+            return
+
+        with torch.no_grad():
+            dist_k_proto = dist_k_proto.detach()
+            assign_k = assign_k.detach().long()
+            assigned_dist = dist_k_proto.gather(1, assign_k.view(-1, 1)).view(-1)
+            finite_mask = torch.isfinite(assigned_dist)
+            if not finite_mask.any():
+                diagnostics["proto_h"] = proto_h.detach()
+                return
+
+            assigned_dist = assigned_dist[finite_mask]
+            assign_k = assign_k[finite_mask]
+            num_clusters = int(proto_h.size(0))
+            device = assigned_dist.device
+
+            if diagnostics["num_clusters"] != num_clusters:
+                diagnostics["num_clusters"] = num_clusters
+                diagnostics["intra_sum"] = torch.zeros(num_clusters, dtype=torch.float64)
+                diagnostics["intra_sq_sum"] = torch.zeros(num_clusters, dtype=torch.float64)
+                diagnostics["intra_count"] = torch.zeros(num_clusters, dtype=torch.long)
+
+            diagnostics["sample_count"] += int(assigned_dist.numel())
+            diagnostics["proto_h"] = proto_h.detach().cpu()
+            diagnostics["intra_sum"] += torch.bincount(
+                assign_k.cpu(),
+                weights=assigned_dist.double().cpu(),
+                minlength=num_clusters,
+            )
+            diagnostics["intra_sq_sum"] += torch.bincount(
+                assign_k.cpu(),
+                weights=assigned_dist.double().pow(2).cpu(),
+                minlength=num_clusters,
+            )
+            diagnostics["intra_count"] += torch.bincount(
+                assign_k.cpu(),
+                minlength=num_clusters,
+            )
+
+    def _log_cluster_distance_diagnostics(self, epoch, diagnostics):
+        interval = int(self.arg.cluster_distance_log_interval)
+        if interval <= 0 or epoch % interval != 0:
+            return
+        if diagnostics is None or diagnostics["sample_count"] == 0:
+            return
+
+        proto_h = diagnostics["proto_h"]
+        if proto_h is None:
+            return
+
+        counts = diagnostics["intra_count"]
+        sums = diagnostics["intra_sum"]
+        sq_sums = diagnostics["intra_sq_sum"]
+        if counts is None or sums is None or sq_sums is None:
+            return
+
+        self.io.print_log(
+            "Cluster distance diagnostics (epoch {}, samples={}):".format(
+                epoch,
+                diagnostics["sample_count"],
+            )
+        )
+        self.io.print_log("Intra-cluster distances to assigned prototype:")
+        self.io.print_log("\tcluster | samples | mean | std")
+        for cluster_id in range(int(diagnostics["num_clusters"])):
+            count = int(counts[cluster_id].item())
+            if count == 0:
+                self.io.print_log("\t{:>7} | {:>7} | {:>6} | {:>6}".format(cluster_id, 0, "nan", "nan"))
+                continue
+            mean = sums[cluster_id].item() / count
+            variance = max(0.0, sq_sums[cluster_id].item() / count - mean ** 2)
+            self.io.print_log(
+                "\t{:>7} | {:>7} | {:>6.4f} | {:>6.4f}".format(
+                    cluster_id,
+                    count,
+                    mean,
+                    math.sqrt(variance),
+                )
+            )
+
+        inter_matrix = self._inter_cluster_distance_matrix(proto_h)
+        if inter_matrix is None:
+            return
+        finite_inter = inter_matrix[torch.isfinite(inter_matrix)]
+        finite_inter = finite_inter[finite_inter > 0]
+        if finite_inter.numel() > 0:
+            self.io.print_log(
+                "Inter-cluster prototype distance summary: min={:.4f}, mean={:.4f}, max={:.4f}".format(
+                    finite_inter.min().item(),
+                    finite_inter.mean().item(),
+                    finite_inter.max().item(),
+                )
+            )
+
+        max_clusters = int(self.arg.cluster_distance_matrix_max_clusters)
+        if max_clusters > 0 and inter_matrix.size(0) <= max_clusters:
+            self.io.print_log("Inter-cluster prototype distance matrix:")
+            self.io.print_log(self._format_distance_matrix(inter_matrix))
+
+    def _inter_cluster_distance_matrix(self, proto_h):
+        if proto_h is None or proto_h.numel() == 0:
+            return None
+        with torch.no_grad():
+            manifold = gt.PoincareBall(self.arg.curvature)
+            proto_h = proto_h.to(self.dev)
+            return manifold.dist(proto_h.unsqueeze(1), proto_h.unsqueeze(0)).cpu()
+
+    @staticmethod
+    def _format_distance_matrix(matrix):
+        matrix = matrix.detach().cpu()
+        size = matrix.size(0)
+        header = "\tcluster | " + " ".join("{:>7}".format(index) for index in range(size))
+        rows = [header]
+        for row_index in range(size):
+            values = " ".join(
+                "{:>7.3f}".format(matrix[row_index, col_index].item())
+                for col_index in range(size)
+            )
+            rows.append("\t{:>7} | {}".format(row_index, values))
+        return "\n".join(rows)
 
     def _hierarchy_triplet_accuracy(self, proto_h, triplets):
         with torch.no_grad():
