@@ -18,6 +18,7 @@ from tools.hyperbolic_embedding_plot import (
     DEFAULT_HYP_TSNE_ITER,
     DEFAULT_HYP_TSNE_PERPLEXITY,
     DEFAULT_STANDALONE_PLOT_CLASSES,
+    format_class_hierarchies,
     render_embedding_diagnostics,
 )
 
@@ -73,6 +74,8 @@ class SkeletonCLR_Plotting(PT_Processor):
             class_names=self.arg.plot_class_names,
             dataset_size=dataset_size,
             split_name="train",
+            render_class_hierarchy=self.arg.plot_hierarchy,
+            hierarchy_linkages=self.arg.plot_hierarchy_linkages,
             hyp_tsne_perplexity=self.arg.plot_hyp_tsne_perplexity,
             hyp_tsne_chunk_size=self.arg.plot_hyp_tsne_chunk_size,
             hyp_tsne_exaggeration_iter=self.arg.plot_hyp_tsne_exaggeration_iter,
@@ -82,6 +85,20 @@ class SkeletonCLR_Plotting(PT_Processor):
 
         for path in paths:
             print(f"Plot saved as {path}.")
+
+        if self.arg.plot_hierarchy:
+            print(
+                format_class_hierarchies(
+                    self.all_features,
+                    self.all_labels,
+                    curvature=self.arg.curvature,
+                    selected_labels=self._plot_selected_labels(),
+                    class_groups=self.arg.plot_class_groups,
+                    class_names=self.arg.plot_class_names,
+                    linkage_methods=self.arg.plot_hierarchy_linkages,
+                    max_merges=self.arg.plot_hierarchy_log_max_merges,
+                )
+            )
 
     def _plot_methods(self):
         methods = self.arg.plot_methods
@@ -127,6 +144,9 @@ class SkeletonCLR_Plotting(PT_Processor):
         parser.add_argument('--plot_color_by', default=['class'], nargs='+', choices=['class', 'class_group'], help='color plots by one or more modes: class or class_group')
         parser.add_argument('--plot_class_groups', action=DictAction, default=dict(), help='mapping from group names to class-label lists')
         parser.add_argument('--plot_class_names', action=DictAction, default=dict(), help='mapping from class labels to semantic class names')
+        parser.add_argument('--plot_hierarchy', type=str2bool, default=True, help='render class-prototype hierarchy diagnostics')
+        parser.add_argument('--plot_hierarchy_linkages', default=['ward_tangent'], nargs='+', help='class hierarchy linkages to render: ward_tangent, single_hyperbolic, complete_hyperbolic, average_hyperbolic, weighted_hyperbolic, or all')
+        parser.add_argument('--plot_hierarchy_log_max_merges', type=int, default=20, help='maximum hierarchy merge rows printed by standalone plotting; 0 prints all')
         parser.add_argument('--plot_hyp_tsne_perplexity', type=float, default=DEFAULT_HYP_TSNE_PERPLEXITY, help='perplexity for hyperbolic t-SNE plotting')
         parser.add_argument('--plot_hyp_tsne_chunk_size', type=int, default=DEFAULT_HYP_TSNE_CHUNK_SIZE, help='chunk size for Poincare distance computation')
         parser.add_argument('--plot_hyp_tsne_exaggeration_iter', type=int, default=DEFAULT_HYP_TSNE_EXAGGERATION_ITER, help='early exaggeration iterations for hyperbolic t-SNE')

@@ -46,6 +46,9 @@ view: 'joint'
 plot_methods: [tsne, hyp_tsne]
 plot_selected_labels: [5, 11, 13, 14, 25, 27, 39, 42, 50, 54]
 plot_color_by: [class_group, class]
+plot_hierarchy: True
+plot_hierarchy_linkages: [ward_tangent, single_hyperbolic, complete_hyperbolic, average_hyperbolic, weighted_hyperbolic]
+plot_hierarchy_log_max_merges: 20
 plot_class_groups:
   object_interaction: [5, 11, 25, 27]
   dressing: [13, 14]

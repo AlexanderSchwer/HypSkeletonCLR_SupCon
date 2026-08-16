@@ -32,6 +32,7 @@ from tools.hyperbolic_hierarchy import (
 from tools.hyperbolic_embedding_plot import (
     DEFAULT_NEGATIVE_DISTANCE_SAMPLES,
     default_hierarchy_plot_classes,
+    format_class_hierarchies,
     render_embedding_diagnostics,
 )
 
@@ -91,6 +92,9 @@ class SkeletonCLR_Processor(PT_Processor):
                     "embedding_plot_color_by": self.arg.embedding_plot_color_by,
                     "embedding_plot_class_groups": self.arg.embedding_plot_class_groups,
                     "embedding_plot_class_names": self.arg.embedding_plot_class_names,
+                    "embedding_plot_hierarchy": self.arg.embedding_plot_hierarchy,
+                    "embedding_plot_hierarchy_linkages": self.arg.embedding_plot_hierarchy_linkages,
+                    "embedding_plot_hierarchy_log_max_merges": self.arg.embedding_plot_hierarchy_log_max_merges,
                 })
             except Exception as exc:
                 self._wandb_ok = False
@@ -364,6 +368,9 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--embedding_plot_color_by', default=['class_group'], nargs='+', choices=['class', 'class_group'], help='color embedding diagnostics by one or more modes: class or class_group')
         parser.add_argument('--embedding_plot_class_groups', action=DictAction, default=dict(), help='mapping from group names to class-label lists')
         parser.add_argument('--embedding_plot_class_names', action=DictAction, default=dict(), help='mapping from class labels to semantic class names')
+        parser.add_argument('--embedding_plot_hierarchy', type=str2bool, default=True, help='render class-prototype hierarchy diagnostics with embedding plots')
+        parser.add_argument('--embedding_plot_hierarchy_linkages', default=['ward_tangent'], nargs='+', help='class hierarchy linkages to render: ward_tangent, single_hyperbolic, complete_hyperbolic, average_hyperbolic, weighted_hyperbolic, or all')
+        parser.add_argument('--embedding_plot_hierarchy_log_max_merges', type=int, default=20, help='maximum hierarchy merge rows written to the training log; 0 logs all')
         
         # endregion yapf: enable
 
@@ -786,6 +793,8 @@ class SkeletonCLR_Processor(PT_Processor):
                 class_names=self.arg.embedding_plot_class_names,
                 dataset_size=snapshot.get("dataset_size"),
                 split_name=snapshot.get("split_name"),
+                render_class_hierarchy=self.arg.embedding_plot_hierarchy,
+                hierarchy_linkages=self.arg.embedding_plot_hierarchy_linkages,
             )
         except Exception as exc:
             print(f"Embedding diagnostics failed for epoch {epoch}: {exc}")
@@ -796,6 +805,27 @@ class SkeletonCLR_Processor(PT_Processor):
                 "Saved embedding diagnostics for epoch {} to {}".format(epoch, output_dir)
             )
             self._safe_wandb_image_log(paths)
+
+        self._log_class_hierarchies(epoch, embeddings, labels)
+
+    def _log_class_hierarchies(self, epoch, embeddings, labels):
+        if not self.arg.embedding_plot_hierarchy:
+            return
+        try:
+            table = format_class_hierarchies(
+                embeddings,
+                labels,
+                curvature=self.arg.curvature,
+                selected_labels=self._embedding_plot_selected_labels(),
+                class_groups=self.arg.embedding_plot_class_groups,
+                class_names=self.arg.embedding_plot_class_names,
+                linkage_methods=self.arg.embedding_plot_hierarchy_linkages,
+                max_merges=self.arg.embedding_plot_hierarchy_log_max_merges,
+            )
+        except Exception as exc:
+            print(f"Class hierarchy logging failed for epoch {epoch}: {exc}")
+            return
+        self.io.print_log(table)
 
     def _safe_wandb_image_log(self, paths):
         if not self._wandb_ok:

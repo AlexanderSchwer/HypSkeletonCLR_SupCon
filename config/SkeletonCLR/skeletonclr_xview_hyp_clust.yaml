@@ -78,6 +78,9 @@ embedding_plot_max_samples: 1024
 embedding_plot_methods: [logmap_pca_disk, hyp_tsne]
 embedding_plot_selected_labels: [5, 11, 13, 14, 25, 27, 39, 42, 50, 54]
 embedding_plot_color_by: [class_group, class]
+embedding_plot_hierarchy: True
+embedding_plot_hierarchy_linkages: [ward_tangent, single_hyperbolic, complete_hyperbolic, average_hyperbolic, weighted_hyperbolic]
+embedding_plot_hierarchy_log_max_merges: 20
 embedding_plot_class_groups:
   object_interaction: [5, 11, 25, 27]
   dressing: [13, 14]

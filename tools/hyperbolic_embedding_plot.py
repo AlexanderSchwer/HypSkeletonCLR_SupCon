@@ -6,6 +6,9 @@ import geoopt as gt
 import matplotlib
 import numpy as np
 import torch
+from matplotlib.lines import Line2D
+from scipy.cluster.hierarchy import dendrogram, linkage
+from scipy.spatial.distance import squareform
 from scipy.sparse import csr_matrix
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.manifold import TSNE
@@ -35,6 +38,20 @@ DEFAULT_HYP_TSNE_BOUNDARY_FRACTION_LIMIT = 0.75
 DEFAULT_HYP_TSNE_VERBOSE = 0
 DEFAULT_ANNOTATE_CENTROIDS = True
 DEFAULT_ANNOTATE_CENTROIDS_MAX = 80
+DEFAULT_CLASS_HIERARCHY_LINKAGES = ("ward_tangent",)
+SUPPORTED_CLASS_HIERARCHY_LINKAGES = (
+    "ward_tangent",
+    "single_hyperbolic",
+    "complete_hyperbolic",
+    "average_hyperbolic",
+    "weighted_hyperbolic",
+)
+HYPERBOLIC_LINKAGE_METHODS = {
+    "single_hyperbolic": "single",
+    "complete_hyperbolic": "complete",
+    "average_hyperbolic": "average",
+    "weighted_hyperbolic": "weighted",
+}
 
 
 def default_hierarchy_plot_classes():
@@ -93,6 +110,8 @@ def render_embedding_diagnostics(
     class_names=None,
     dataset_size=None,
     split_name=None,
+    render_class_hierarchy=True,
+    hierarchy_linkages=None,
     hyp_tsne_perplexity=DEFAULT_HYP_TSNE_PERPLEXITY,
     hyp_tsne_chunk_size=DEFAULT_HYP_TSNE_CHUNK_SIZE,
     hyp_tsne_exaggeration_iter=DEFAULT_HYP_TSNE_EXAGGERATION_ITER,
@@ -221,7 +240,164 @@ def render_embedding_diagnostics(
         )
         created_paths.append(distance_path)
 
+    if render_class_hierarchy:
+        for hierarchy_linkage in _normalize_hierarchy_linkages(hierarchy_linkages):
+            try:
+                hierarchy = compute_class_hierarchy(
+                    embeddings,
+                    labels,
+                    curvature=curvature,
+                    selected_labels=None,
+                    linkage_method=hierarchy_linkage,
+                )
+                hierarchy_path = os.path.join(
+                    output_dir,
+                    f"epoch_{epoch:04d}_{hierarchy['linkage_method']}_class_hierarchy.png",
+                )
+                _plot_class_hierarchy(
+                    hierarchy,
+                    save_path=hierarchy_path,
+                    epoch=epoch,
+                    class_groups=class_groups,
+                    class_names=class_names,
+                    metadata_text=metadata_text,
+                )
+                created_paths.append(hierarchy_path)
+            except Exception as exc:
+                print(
+                    "Skipping class hierarchy '{}' for epoch {}: {}".format(
+                        hierarchy_linkage,
+                        epoch,
+                        exc,
+                    )
+                )
+
     return created_paths
+
+
+def compute_class_hierarchy(
+    embeddings,
+    labels,
+    curvature=1.0,
+    selected_labels=None,
+    linkage_method="ward_tangent",
+):
+    linkage_method = _normalize_hierarchy_linkage(linkage_method)
+    embeddings = _as_numpy_2d(embeddings, "embeddings")
+    labels = np.asarray(labels)
+    finite_sample_mask = np.isfinite(embeddings).all(axis=1)
+    embeddings = embeddings[finite_sample_mask]
+    labels = labels[finite_sample_mask]
+    if embeddings.shape[0] != labels.shape[0]:
+        raise ValueError(
+            "embeddings and labels must contain the same number of samples: "
+            f"{embeddings.shape[0]} != {labels.shape[0]}"
+        )
+
+    embeddings = _project_points_to_ball(embeddings, curvature)
+    selected_labels = parse_selected_labels(selected_labels, default=None)
+    if selected_labels is not None:
+        mask = np.isin(labels, selected_labels)
+        embeddings = embeddings[mask]
+        labels = labels[mask]
+
+    if embeddings.shape[0] == 0:
+        raise ValueError("No embeddings available after filtering.")
+
+    class_ids, class_counts, tangent_prototypes = _class_tangent_prototypes(
+        embeddings,
+        labels,
+        curvature,
+    )
+    if len(class_ids) < 2:
+        raise ValueError("Class hierarchy needs at least two classes.")
+
+    poincare_prototypes = _expmap0(tangent_prototypes, curvature)
+    distance_matrix = None
+    if linkage_method == "ward_tangent":
+        linkage_matrix = linkage(
+            tangent_prototypes,
+            method="ward",
+            metric="euclidean",
+            optimal_ordering=True,
+        )
+        distance_description = "Ward linkage distance in logmap tangent space"
+    else:
+        scipy_method = HYPERBOLIC_LINKAGE_METHODS[linkage_method]
+        distance_matrix = _poincare_distance_matrix(poincare_prototypes, curvature)
+        linkage_matrix = linkage(
+            squareform(distance_matrix, checks=False),
+            method=scipy_method,
+            optimal_ordering=True,
+        )
+        distance_description = (
+            f"{scipy_method} linkage over Poincare class-prototype distances"
+        )
+
+    return {
+        "class_ids": class_ids,
+        "class_counts": class_counts,
+        "tangent_prototypes": tangent_prototypes,
+        "poincare_prototypes": poincare_prototypes,
+        "distance_matrix": distance_matrix,
+        "linkage_matrix": linkage_matrix,
+        "linkage_method": linkage_method,
+        "distance_description": distance_description,
+    }
+
+
+def format_class_hierarchy(
+    embeddings,
+    labels,
+    curvature=1.0,
+    selected_labels=None,
+    class_groups=None,
+    class_names=None,
+    linkage_method="ward_tangent",
+    max_merges=20,
+):
+    hierarchy = compute_class_hierarchy(
+        embeddings,
+        labels,
+        curvature=curvature,
+        selected_labels=selected_labels,
+        linkage_method=linkage_method,
+    )
+    class_groups = _normalize_class_groups(class_groups)
+    class_names = _normalize_class_names(class_names)
+    return _format_hierarchy_merge_table(
+        hierarchy,
+        class_groups=class_groups,
+        class_names=class_names,
+        max_merges=max_merges,
+    )
+
+
+def format_class_hierarchies(
+    embeddings,
+    labels,
+    curvature=1.0,
+    selected_labels=None,
+    class_groups=None,
+    class_names=None,
+    linkage_methods=None,
+    max_merges=20,
+):
+    tables = []
+    for linkage_method in _normalize_hierarchy_linkages(linkage_methods):
+        tables.append(
+            format_class_hierarchy(
+                embeddings,
+                labels,
+                curvature=curvature,
+                selected_labels=selected_labels,
+                class_groups=class_groups,
+                class_names=class_names,
+                linkage_method=linkage_method,
+                max_merges=max_merges,
+            )
+        )
+    return "\n".join(tables)
 
 
 def _as_numpy_2d(values, name):
@@ -431,6 +607,58 @@ def _normalize_color_modes(color_by):
         if mode not in modes:
             modes.append(mode)
     return modes
+
+
+def _normalize_hierarchy_linkages(linkage_methods):
+    tokens = _selection_tokens(linkage_methods)
+    if not tokens:
+        tokens = list(DEFAULT_CLASS_HIERARCHY_LINKAGES)
+
+    normalized = []
+    for token in tokens:
+        if isinstance(token, str) and token.strip().lower() == "all":
+            for method in SUPPORTED_CLASS_HIERARCHY_LINKAGES:
+                if method not in normalized:
+                    normalized.append(method)
+            continue
+        method = _normalize_hierarchy_linkage(token)
+        if method not in normalized:
+            normalized.append(method)
+    return normalized
+
+
+def _normalize_hierarchy_linkage(linkage_method):
+    method = str(linkage_method or "").strip().lower().replace("-", "_")
+    aliases = {
+        "ward": "ward_tangent",
+        "ward_tangent": "ward_tangent",
+        "tangent_ward": "ward_tangent",
+        "single": "single_hyperbolic",
+        "single_hyperbolic": "single_hyperbolic",
+        "hyperbolic_single": "single_hyperbolic",
+        "complete": "complete_hyperbolic",
+        "complete_hyperbolic": "complete_hyperbolic",
+        "hyperbolic_complete": "complete_hyperbolic",
+        "average": "average_hyperbolic",
+        "average_hyperbolic": "average_hyperbolic",
+        "hyperbolic_average": "average_hyperbolic",
+        "weighted": "weighted_hyperbolic",
+        "weighted_hyperbolic": "weighted_hyperbolic",
+        "hyperbolic_weighted": "weighted_hyperbolic",
+    }
+    if method in aliases:
+        return aliases[method]
+    if method in ("centroid", "median"):
+        raise ValueError(
+            "centroid and median linkage require vector-space centroids and are not "
+            "enabled for hyperbolic distance diagnostics."
+        )
+    raise ValueError(
+        "Unsupported class hierarchy linkage '{}'. Supported values: {}.".format(
+            linkage_method,
+            ", ".join(SUPPORTED_CLASS_HIERARCHY_LINKAGES),
+        )
+    )
 
 
 def _plot_color_values(labels, color_by, class_groups, class_names):
@@ -686,6 +914,207 @@ def _plot_distance_histograms(
     fig.tight_layout()
     fig.savefig(save_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
+
+
+def _class_tangent_prototypes(embeddings, labels, curvature):
+    tangent = _logmap0(embeddings, curvature)
+    class_ids = sorted(int(label) for label in np.unique(labels))
+    class_counts = []
+    prototypes = []
+    for class_id in class_ids:
+        mask = labels == class_id
+        class_tangent = tangent[mask]
+        if class_tangent.shape[0] == 0:
+            continue
+        class_counts.append(int(class_tangent.shape[0]))
+        prototypes.append(class_tangent.mean(axis=0))
+
+    if not prototypes:
+        raise ValueError("No class prototypes could be computed.")
+
+    return (
+        np.asarray(class_ids, dtype=np.int64),
+        np.asarray(class_counts, dtype=np.int64),
+        np.asarray(prototypes, dtype=np.float32),
+    )
+
+
+def _plot_class_hierarchy(
+    hierarchy,
+    save_path,
+    epoch,
+    class_groups,
+    class_names,
+    metadata_text=None,
+):
+    class_ids = hierarchy["class_ids"]
+    class_counts = hierarchy["class_counts"]
+    linkage_matrix = hierarchy["linkage_matrix"]
+    linkage_method = hierarchy["linkage_method"]
+    leaf_labels = [
+        _class_hierarchy_leaf_label(class_id, class_count, class_names)
+        for class_id, class_count in zip(class_ids, class_counts)
+    ]
+    leaf_to_class = dict(zip(leaf_labels, class_ids))
+    group_lookup = _class_group_lookup(class_groups)
+    group_colors = _class_group_colors(class_ids, group_lookup)
+
+    fig_height = max(4.8, 1.5 + 0.34 * len(class_ids))
+    fig, ax = plt.subplots(figsize=(10.5, fig_height))
+    dendrogram(
+        linkage_matrix,
+        labels=leaf_labels,
+        orientation="right",
+        ax=ax,
+        leaf_font_size=_class_hierarchy_leaf_font_size(len(class_ids)),
+        color_threshold=0,
+        above_threshold_color="#333333",
+    )
+
+    for tick in ax.get_yticklabels():
+        class_id = leaf_to_class.get(tick.get_text())
+        group_name = group_lookup.get(int(class_id), "other") if class_id is not None else "other"
+        tick.set_color(group_colors[group_name])
+
+    ax.set_title(
+        _title_with_metadata(
+            f"Epoch {epoch} - {_hierarchy_display_name(linkage_method)} class prototype hierarchy",
+            metadata_text,
+        )
+    )
+    ax.set_xlabel(hierarchy["distance_description"])
+    ax.grid(True, axis="x", color="#d9d9d9", linewidth=0.5, alpha=0.6)
+
+    if group_colors:
+        handles = [
+            Line2D([0], [0], color=color, lw=3, label=group_name)
+            for group_name, color in group_colors.items()
+        ]
+        ax.legend(handles=handles, title="Class group", loc="lower right", frameon=False)
+
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _class_hierarchy_leaf_label(class_id, class_count, class_names):
+    return f"{_class_display_name(int(class_id), class_names)} (n={int(class_count)})"
+
+
+def _class_hierarchy_leaf_font_size(num_classes):
+    if num_classes > 40:
+        return 5
+    if num_classes > 20:
+        return 6
+    return 8
+
+
+def _class_group_lookup(class_groups):
+    lookup = {}
+    for group_name, group_classes in class_groups.items():
+        for class_id in group_classes:
+            lookup[int(class_id)] = str(group_name)
+    return lookup
+
+
+def _class_group_colors(class_ids, group_lookup):
+    group_names = []
+    for class_id in class_ids:
+        group_name = group_lookup.get(int(class_id), "other")
+        if group_name not in group_names:
+            group_names.append(group_name)
+
+    cmap = plt.get_cmap("tab10", max(1, len(group_names)))
+    return {
+        group_name: cmap(index)
+        for index, group_name in enumerate(group_names)
+    }
+
+
+def _format_hierarchy_merge_table(hierarchy, class_groups, class_names, max_merges):
+    linkage_matrix = hierarchy["linkage_matrix"]
+    class_ids = hierarchy["class_ids"]
+    members = {index: [int(class_id)] for index, class_id in enumerate(class_ids)}
+
+    rows = []
+    for merge_index, (left_id, right_id, distance, merged_leaf_count) in enumerate(linkage_matrix):
+        left_id = int(left_id)
+        right_id = int(right_id)
+        left_members = members[left_id]
+        right_members = members[right_id]
+        merged_members = left_members + right_members
+        rows.append(
+            {
+                "step": merge_index + 1,
+                "left": _format_hierarchy_member_list(left_members, class_names),
+                "right": _format_hierarchy_member_list(right_members, class_names),
+                "distance": float(distance),
+                "classes": int(merged_leaf_count),
+                "groups": _format_hierarchy_groups(merged_members, class_groups),
+            }
+        )
+        members[len(class_ids) + merge_index] = merged_members
+
+    selected_rows = _select_hierarchy_rows(rows, max_merges=max_merges)
+    lines = [
+        "{} class hierarchy diagnostics:".format(
+            _hierarchy_display_name(hierarchy["linkage_method"])
+        ),
+        "\t{}.".format(hierarchy["distance_description"]),
+        "\tstep | merge | linkage_distance | classes | groups",
+    ]
+    for row in selected_rows:
+        if row is None:
+            skipped = len(rows) - len(selected_rows) + 1
+            lines.append(f"\t... {skipped} merges omitted ...")
+            continue
+        lines.append(
+            "\t{step:>4} | {left} + {right} | {distance:>8.4f} | {classes:>7} | {groups}".format(
+                **row
+            )
+        )
+    return "\n".join(lines)
+
+
+def _hierarchy_display_name(linkage_method):
+    return str(linkage_method).replace("_", " ").title()
+
+
+def _select_hierarchy_rows(rows, max_merges):
+    if max_merges is None or max_merges <= 0 or len(rows) <= max_merges:
+        return rows
+    head_count = max(1, max_merges // 2)
+    tail_count = max(1, max_merges - head_count)
+    return rows[:head_count] + [None] + rows[-tail_count:]
+
+
+def _format_hierarchy_member_list(member_labels, class_names):
+    labels = sorted(int(label) for label in member_labels)
+    if len(labels) <= 3:
+        return "{" + ", ".join(_class_display_name(label, class_names) for label in labels) + "}"
+    return "{" + ", ".join(str(label) for label in labels[:3]) + f", ...; n={len(labels)}" + "}"
+
+
+def _format_hierarchy_groups(member_labels, class_groups):
+    lookup = _class_group_lookup(class_groups)
+    groups = []
+    for label in sorted(int(item) for item in member_labels):
+        group = lookup.get(label, "other")
+        if group not in groups:
+            groups.append(group)
+    return ", ".join(groups)
+
+
+def _poincare_distance_matrix(points, curvature):
+    ball = gt.PoincareBall(c=float(curvature))
+    with torch.no_grad():
+        tensor = torch.as_tensor(points, dtype=torch.float32)
+        tensor = ball.projx(tensor)
+        distances = ball.dist(tensor.unsqueeze(1), tensor.unsqueeze(0))
+    matrix = distances.cpu().numpy().astype(np.float64)
+    matrix = 0.5 * (matrix + matrix.T)
+    np.fill_diagonal(matrix, 0.0)
+    return matrix
 
 
 def _finite_1d(values):
