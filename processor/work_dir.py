@@ -43,8 +43,25 @@ def build_canonical_work_dir(arg, processor_name=None):
     family = _infer_run_family(arg, processor_name)
     root = _infer_work_dir_root(getattr(arg, 'work_dir', 'work_dir'), family)
     setup = _build_setup_component(arg)
-    experiment = _build_experiment_component(arg)
+    experiment = _build_experiment_component(arg, family)
     return os.path.join(root, family, setup, experiment)
+
+
+def wandb_run_identity_from_work_dir(work_dir, run_subdir='runs'):
+    """Return a W&B name from a finalized work_dir path, without grouping."""
+    parts = _path_parts(os.path.normpath(os.path.expandvars(os.path.expanduser(work_dir))))
+    if 'work_dir' in parts:
+        parts = parts[parts.index('work_dir') + 1:]
+
+    if not parts:
+        name = os.path.basename(str(work_dir).rstrip('/\\')) or 'run'
+        return name, None
+
+    name_parts = parts
+    if len(parts) >= 2 and parts[-2] == run_subdir:
+        name_parts = parts[:-2]
+    name = '/'.join(name_parts) if name_parts else '/'.join(parts)
+    return name, None
 
 
 def _default_run_id():
@@ -135,6 +152,11 @@ def _join_path_prefix(drive, is_absolute, parts):
     return prefix
 
 
+def _path_parts(path):
+    drive, tail = os.path.splitdrive(path)
+    return [part for part in re.split(r'[\\/]+', tail) if part]
+
+
 def _build_setup_component(arg):
     model_args = getattr(arg, 'model_args', {}) or {}
     data_paths = _feeder_arg_strings(arg)
@@ -161,7 +183,7 @@ def _build_setup_component(arg):
     return _slug('-'.join(parts))
 
 
-def _build_experiment_component(arg):
+def _build_experiment_component(arg, family=None):
     model_args = getattr(arg, 'model_args', {}) or {}
     tags = []
 
@@ -181,13 +203,62 @@ def _build_experiment_component(arg):
     if base_lr is not None:
         tags.append('lrb{}'.format(_format_value(base_lr)))
 
+    if family == 'linear_eval':
+        num_epoch = getattr(arg, 'num_epoch', None)
+        if num_epoch is not None:
+            tags.append('ep{}'.format(_format_value(num_epoch)))
+
     scheduler_tag = _infer_scheduler_tag(arg)
     if scheduler_tag:
         tags.append(scheduler_tag)
+        if family == 'linear_eval':
+            tags.extend(_linear_eval_scheduler_detail_tags(arg, scheduler_tag))
 
     if not tags:
         tags.append('default')
     return _slug('-'.join(tags))
+
+
+def _linear_eval_scheduler_detail_tags(arg, scheduler_tag):
+    tags = []
+    if scheduler_tag == 'multistep':
+        milestones = list(getattr(arg, 'lr_milestones', None) or [])
+        if not milestones:
+            milestones = list(getattr(arg, 'step', None) or [])
+        if milestones:
+            tags.append('ms{}'.format('-'.join(str(int(value)) for value in milestones)))
+        gamma = getattr(arg, 'lr_gamma', None)
+        if gamma is not None:
+            tags.append('g{}'.format(_format_value(gamma)))
+    elif scheduler_tag == 'step':
+        step_size = getattr(arg, 'lr_step_size', None)
+        if step_size is not None:
+            tags.append('step{}'.format(_format_value(step_size)))
+        gamma = getattr(arg, 'lr_gamma', None)
+        if gamma is not None:
+            tags.append('g{}'.format(_format_value(gamma)))
+    elif scheduler_tag == 'exponential':
+        gamma = getattr(arg, 'lr_gamma', None)
+        if gamma is not None:
+            tags.append('g{}'.format(_format_value(gamma)))
+    elif scheduler_tag == 'cosine':
+        t_max = getattr(arg, 'lr_t_max', None)
+        if t_max is not None:
+            tags.append('tmax{}'.format(_format_value(t_max)))
+        eta_min = getattr(arg, 'lr_eta_min', None)
+        if eta_min is not None:
+            tags.append('eta{}'.format(_format_value(eta_min)))
+    elif scheduler_tag == 'cosine-warm-restarts':
+        t_0 = getattr(arg, 'lr_t_0', None)
+        if t_0 is not None:
+            tags.append('t0{}'.format(_format_value(t_0)))
+        t_mult = getattr(arg, 'lr_t_mult', None)
+        if t_mult is not None:
+            tags.append('tmult{}'.format(_format_value(t_mult)))
+        eta_min = getattr(arg, 'lr_eta_min', None)
+        if eta_min is not None:
+            tags.append('eta{}'.format(_format_value(eta_min)))
+    return tags
 
 
 def _infer_dataset(model_args, paths):

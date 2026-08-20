@@ -21,6 +21,7 @@ from torchlight import import_class
 
 from .processor import Processor
 from .pretrain import PT_Processor, add_lr_scheduler_args
+from .wandb_utils import init_wandb_from_work_dir
 
 from tools.losses import SupConLoss
 from tools.hyperbolic_hierarchy import (
@@ -55,10 +56,10 @@ class SkeletonCLR_Processor(PT_Processor):
         self._wandb_run_dir = None
         if self._wandb_ok:
             try:
-                mode = "offline" if self.arg.wandb_offline else "online"
-                self._wandb_run = wandb.init(
-                    project="HypSkeletonCLR_SupCon",
-                    mode=mode,
+                self._wandb_run = init_wandb_from_work_dir(
+                    self.arg,
+                    job_type="pretrain",
+                    config=vars(self.arg),
                 )
                 if self._wandb_run is not None and self._wandb_run.dir:
                     self._wandb_run_dir = os.path.dirname(self._wandb_run.dir)

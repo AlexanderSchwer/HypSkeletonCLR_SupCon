@@ -3,7 +3,11 @@ import tempfile
 import unittest
 from argparse import Namespace
 
-from processor.work_dir import build_canonical_work_dir, prepare_training_work_dir
+from processor.work_dir import (
+    build_canonical_work_dir,
+    prepare_training_work_dir,
+    wandb_run_identity_from_work_dir,
+)
 
 
 class TrainingWorkDirTest(unittest.TestCase):
@@ -194,6 +198,43 @@ class TrainingWorkDirTest(unittest.TestCase):
             os.path.normpath(
                 'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
                 'geoopt-c1-lrb0p05-constant-lr'))
+
+    def test_canonical_linear_eval_uses_argument_details_in_experiment_path(self):
+        arg = Namespace(
+            work_dir='work_dir/linear_eval/1_model300',
+            config='config/linear_eval/linear_eval_skeletonclr_xview.yaml',
+            model='net.skeletonclr.SkeletonCLR',
+            model_args={'num_class': 60, 'hidden_channels': 16, 'curvature': 1.0},
+            train_feeder_args={'data_path': 'xview/train_position.npy'},
+            test_feeder_args={'data_path': 'xview/val_position.npy'},
+            base_lr=8.0,
+            num_epoch=100,
+            step=[],
+            lr_scheduler='multistep',
+            lr_milestones=[80],
+            lr_gamma=0.1,
+        )
+
+        resolved = build_canonical_work_dir(arg, processor_name='LE_Processor')
+
+        self.assertEqual(
+            resolved,
+            os.path.normpath(
+                'work_dir/linear_eval/ntu60-xview-frame50-hc16/'
+                'geoopt-c1-lrb8-ep100-multistep-ms80-g0p1'))
+
+    def test_wandb_identity_uses_experiment_path_as_name_without_group(self):
+        work_dir = os.path.normpath(
+            'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
+            'geoopt-c1-clust5-lrb0p1-cosine/runs/20260825-143012_pid12345')
+
+        name, group = wandb_run_identity_from_work_dir(work_dir)
+
+        self.assertEqual(
+            name,
+            'skeletonclr/ntu60-xview-frame50-hc16/'
+            'geoopt-c1-clust5-lrb0p1-cosine')
+        self.assertIsNone(group)
 
 
 if __name__ == '__main__':

@@ -20,6 +20,7 @@ from torchlight import import_class
 
 from .processor import Processor
 from .pretrain import PT_Processor, add_lr_scheduler_args
+from .wandb_utils import init_wandb_from_work_dir
 
 import wandb
 
@@ -34,7 +35,11 @@ class SkeletonCLR_3views_Eucl_Processor(PT_Processor):
         super().__init__(*args, **kwargs)
         
         # Initialize wandb run
-        wandb.init(project="HypSkeletonCLR_SupCon")
+        init_wandb_from_work_dir(
+            self.arg,
+            job_type="pretrain",
+            config=vars(self.arg),
+        )
         wandb.config.update({
             "learning_rate": self.arg.base_lr,
             "optimizer": self.arg.optimizer,

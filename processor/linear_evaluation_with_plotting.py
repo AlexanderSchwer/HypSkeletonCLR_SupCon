@@ -18,6 +18,7 @@ from torchlight import import_class
 
 from .processor import Processor
 from .lr_scheduler import LRSchedulerMixin, add_lr_scheduler_args
+from .wandb_utils import init_wandb_from_work_dir
 
 import geoopt as gt
 
@@ -99,9 +100,10 @@ class LE_Processor(LRSchedulerMixin, Processor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Initialize WandB
-        wandb.init(
-            project="HypSkeletonCLR_SupCon",
-            config=vars(self.arg),  # Pass all arguments to wandb config
+        init_wandb_from_work_dir(
+            self.arg,
+            job_type="linear_eval",
+            config=vars(self.arg),
         )
         
         self.best_result = 0
