@@ -5,6 +5,7 @@ from torchlight import import_class
 # HYP: libraries
 import geoopt as gt
 import geoopt.manifolds.stereographic.math as pmath 
+from tools.sinkhorn import sinkhorn_balanced_probabilities
 
 #import tools.hyptorch.pmath as pmath
 
@@ -15,7 +16,9 @@ class SkeletonCLR_3views(nn.Module):
                  momentum=0.999, Temperature=0.07, mlp=True, in_channels=3, hidden_channels=64,
                  hidden_dim=256, num_class=60, dropout=0.5,
                  graph_args={'layout': 'ntu-rgb+d', 'strategy': 'spatial'},
-                 edge_importance_weighting=True, curvature=1.0, **kwargs):
+                 edge_importance_weighting=True, curvature=1.0,
+                 cluster_enabled=False, num_clusters=120, sinkhorn_tau=0.1,
+                 sinkhorn_iters=20, sinkhorn_eps=0.05, **kwargs):
         """
         K: queue size; number of negative keys (default: 32768)
         m: momentum of updating key encoder (default: 0.999)
@@ -25,6 +28,11 @@ class SkeletonCLR_3views(nn.Module):
         super().__init__()
         base_encoder = import_class(base_encoder)
         self.pretrain = pretrain
+        self.cluster_enabled = bool(cluster_enabled and pretrain)
+        self.num_clusters = int(num_clusters)
+        self.sinkhorn_tau = float(sinkhorn_tau)
+        self.sinkhorn_iters = int(sinkhorn_iters)
+        self.sinkhorn_eps = float(sinkhorn_eps)
         self.Bone = [(1, 2), (2, 21), (3, 21), (4, 3), (5, 21), (6, 5), (7, 6), (8, 7), (9, 21),
                      (10, 9), (11, 10), (12, 11), (13, 1), (14, 13), (15, 14), (16, 15), (17, 1),
                      (18, 17), (19, 18), (20, 19), (21, 21), (22, 23), (23, 8), (24, 25), (25, 12)]
@@ -128,6 +136,18 @@ class SkeletonCLR_3views(nn.Module):
             self.queue_bone = F.normalize(self.queue_bone, dim=0)
             self.register_buffer("queue_ptr_bone", torch.zeros(1, dtype=torch.long))
 
+            if self.cluster_enabled:
+                if self.num_clusters <= 1:
+                    raise ValueError("num_clusters must be > 1 when clustering is enabled")
+                if self.sinkhorn_tau <= 0:
+                    raise ValueError("sinkhorn_tau must be > 0")
+                if self.sinkhorn_iters < 1:
+                    raise ValueError("sinkhorn_iters must be >= 1")
+                if self.sinkhorn_eps <= 0:
+                    raise ValueError("sinkhorn_eps must be > 0")
+                self.proto_tan = nn.Parameter(torch.empty(self.num_clusters, feature_dim))
+                nn.init.normal_(self.proto_tan, std=0.1)
+
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
         """
@@ -150,21 +170,21 @@ class SkeletonCLR_3views(nn.Module):
     def _dequeue_and_enqueue(self, keys):
         batch_size = keys.shape[0]
         ptr = int(self.queue_ptr)
-        gpu_index = keys.device.index
+        gpu_index = keys.device.index if keys.device.index is not None else 0
         self.queue[:, (ptr + batch_size * gpu_index):(ptr + batch_size * (gpu_index + 1))] = keys.T
 
     @torch.no_grad()
     def _dequeue_and_enqueue_motion(self, keys):
         batch_size = keys.shape[0]
         ptr = int(self.queue_ptr_motion)
-        gpu_index = keys.device.index
+        gpu_index = keys.device.index if keys.device.index is not None else 0
         self.queue_motion[:, (ptr + batch_size * gpu_index):(ptr + batch_size * (gpu_index + 1))] = keys.T
 
     @torch.no_grad()
     def _dequeue_and_enqueue_bone(self, keys):
         batch_size = keys.shape[0]
         ptr = int(self.queue_ptr_bone)
-        gpu_index = keys.device.index
+        gpu_index = keys.device.index if keys.device.index is not None else 0
         self.queue_bone[:, (ptr + batch_size * gpu_index):(ptr + batch_size * (gpu_index + 1))] = keys.T
 
     @torch.no_grad()
@@ -222,17 +242,20 @@ class SkeletonCLR_3views(nn.Module):
             im_k_bone[:, :, :, v1 - 1, :] = im_k[:, :, :, v1 - 1, :] - im_k[:, :, :, v2 - 1, :]
 
         # compute query features
-        q = self.encoder_q(im_q)  # queries shape: [batch_size, feature_dim]
-        q = F.normalize(q, dim=1)
-        q = poincare_ball.expmap0(q) # shape: [batch_size, feature_dim]
+        q_e = self.encoder_q(im_q)  # queries shape: [batch_size, feature_dim]
+        q_e = F.normalize(q_e, dim=1)
+        q = poincare_ball.expmap0(q_e) # shape: [batch_size, feature_dim]
 
-        q_motion = self.encoder_q_motion(im_q_motion)
-        q_motion = F.normalize(q_motion, dim=1)
-        q_motion = poincare_ball.expmap0(q_motion)
+        q_motion_e = self.encoder_q_motion(im_q_motion)
+        q_motion_e = F.normalize(q_motion_e, dim=1)
+        q_motion = poincare_ball.expmap0(q_motion_e)
 
-        q_bone = self.encoder_q_bone(im_q_bone)
-        q_bone = F.normalize(q_bone, dim=1)
-        q_bone = poincare_ball.expmap0(q_bone)
+        q_bone_e = self.encoder_q_bone(im_q_bone)
+        q_bone_e = F.normalize(q_bone_e, dim=1)
+        q_bone = poincare_ball.expmap0(q_bone_e)
+
+        q_all_e = F.normalize((q_e + q_motion_e + q_bone_e) / 3.0, dim=1)
+        q_all = poincare_ball.expmap0(q_all_e)
 
         # compute key features
         with torch.no_grad():  # no gradient to keys
@@ -241,20 +264,23 @@ class SkeletonCLR_3views(nn.Module):
             self._momentum_update_key_encoder_bone()
 
             # compute key features
-            k = self.encoder_k(im_k)  # keys shape: [batch_size, feature_dim]
-            k = F.normalize(k, dim=1)
-            k_eucl = k.clone().detach()
-            k = poincare_ball.expmap0(k) # shape: [batch_size, feature_dim]
+            k_e = self.encoder_k(im_k)  # keys shape: [batch_size, feature_dim]
+            k_e = F.normalize(k_e, dim=1)
+            k_eucl = k_e.clone().detach()
+            k = poincare_ball.expmap0(k_e) # shape: [batch_size, feature_dim]
 
-            k_motion = self.encoder_k_motion(im_k_motion)
-            k_motion = F.normalize(k_motion, dim=1)
-            k_motion_eucl = k_motion.clone().detach()
-            k_motion = poincare_ball.expmap0(k_motion)
+            k_motion_e = self.encoder_k_motion(im_k_motion)
+            k_motion_e = F.normalize(k_motion_e, dim=1)
+            k_motion_eucl = k_motion_e.clone().detach()
+            k_motion = poincare_ball.expmap0(k_motion_e)
 
-            k_bone = self.encoder_k_bone(im_k_bone)
-            k_bone = F.normalize(k_bone, dim=1)
-            k_bone_eucl = k_bone.clone().detach()
-            k_bone = poincare_ball.expmap0(k_bone)
+            k_bone_e = self.encoder_k_bone(im_k_bone)
+            k_bone_e = F.normalize(k_bone_e, dim=1)
+            k_bone_eucl = k_bone_e.clone().detach()
+            k_bone = poincare_ball.expmap0(k_bone_e)
+
+            k_all_e = F.normalize((k_e + k_motion_e + k_bone_e) / 3.0, dim=1)
+            k_all = poincare_ball.expmap0(k_all_e)
         
         # compute logits
         # positive logits shape: [batch_size, 1]
@@ -283,7 +309,7 @@ class SkeletonCLR_3views(nn.Module):
         logits_bone /= self.T
 
         # labels: positive key indicators
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
+        labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
 
         # dequeue and enqueue
         #self._dequeue_and_enqueue(k)
@@ -291,5 +317,35 @@ class SkeletonCLR_3views(nn.Module):
         self._dequeue_and_enqueue_motion(k_motion_eucl)
         self._dequeue_and_enqueue_bone(k_bone_eucl)
 
-        return logits, logits_motion, logits_bone, labels
+        features = torch.cat([q_all.unsqueeze(1), k_all.unsqueeze(1)], dim=1)
+
+        cluster_pack = None
+        if self.cluster_enabled:
+            proto_norm = self.proto_tan.norm(dim=1, keepdim=True).clamp_min(1e-12)
+            proto_tan = self.proto_tan * (torch.tanh(proto_norm) / proto_norm)
+            proto_h = poincare_ball.expmap0(proto_tan)
+
+            dist_q_proto = poincare_ball.dist(q_all.unsqueeze(1), proto_h.unsqueeze(0))
+            dist_k_proto = poincare_ball.dist(k_all.unsqueeze(1), proto_h.unsqueeze(0))
+            p_q = F.softmax(-dist_q_proto / self.sinkhorn_tau, dim=1)
+            p_k = F.softmax(-dist_k_proto / self.sinkhorn_tau, dim=1)
+
+            q_k = sinkhorn_balanced_probabilities(
+                p_k.detach(),
+                n_iters=self.sinkhorn_iters,
+                exponent=self.sinkhorn_tau / self.sinkhorn_eps,
+            )
+            assign_k = torch.argmax(q_k, dim=1)
+
+            cluster_pack = {
+                "dist_q_proto": dist_q_proto,
+                "dist_k_proto": dist_k_proto,
+                "p_q": p_q,
+                "p_k": p_k,
+                "q_k": q_k,
+                "proto_h": proto_h,
+                "assign_k": assign_k,
+            }
+
+        return logits, logits_motion, logits_bone, labels, features, cluster_pack
         
