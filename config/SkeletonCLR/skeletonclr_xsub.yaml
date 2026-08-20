@@ -1,13 +1,14 @@
-work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/c1_cosann_xsub_v2
+work_dir: work_dir/skeletonclr/1_xsub_frame50_channel16_epoch300_cross150/c005_cosann_no_clust
 
-#weights: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/unsupervised/epoch150_model.pt
+#weights: work_dir/skeletonclr/1_xsub_frame50_channel16_epoch300_cross150/unsupervised/epoch150_model.pt
 #ignore_weights: [encoder_q.fc, encoder_q_motion.fc, encoder_q_bone.fc, encoder_k, encoder_k_motion, encoder_k_bone, queue, queue_motion, queue_bone]
 
 # feeder
 train_feeder: feeder.ntu_feeder.Feeder_dual
+dataset_root: ''
 train_feeder_args:
-  data_path: NTU60_frame50/xsub/train_position.npy
-  label_path: NTU-RGB-D/xsub/train_label.pkl
+  data_path: xsub/train_data.npy
+  label_path: xsub/train_label.pkl
   shear_amplitude: 0.5
   temperal_padding_ratio: 6
   mmap: True
@@ -32,6 +33,11 @@ model_args:
     strategy: 'spatial'
   edge_importance_weighting: True
   curvature: 1.0
+  cluster_enabled: False
+  num_clusters: 60
+  sinkhorn_tau: 0.1
+  sinkhorn_iters: 20
+  sinkhorn_eps: 0.05
 
 # optim
 nesterov: True
@@ -57,6 +63,41 @@ view: 'joint'
 sup_epoch: 301
 temperature: 0.07
 curvature: 1.0
+lambda_sink: 0.0
+lambda_hier: 0.0
+hier_update_interval: 200
+hier_warmup_steps: 1000
+hier_triplets: 512
+hier_margin: 0.05
+affinity_momentum: 0.9
+affinity_temperature: 1.0
+
+# live embedding diagnostics
+embedding_plot_interval: 5
+embedding_plot_max_samples: 1024
+embedding_plot_methods: [logmap_pca_disk, hyp_tsne]
+embedding_plot_selected_labels: [5, 11, 13, 14, 25, 27, 39, 42, 50, 54]
+embedding_plot_color_by: [class_group, class]
+embedding_plot_hierarchy: True
+embedding_plot_hierarchy_linkages: [average_hyperbolic]
+embedding_plot_hierarchy_log_max_merges: 20
+embedding_plot_class_groups:
+  object_interaction: [5, 11, 25, 27]
+  dressing: [13, 14]
+  gesture: [39]
+  falling_posture: [42]
+  interpersonal: [50, 54]
+embedding_plot_class_names:
+  5: "pickup"
+  11: "writing"
+  13: "wear jacket"
+  14: "take off jacket"
+  25: "hopping"
+  27: "phone call"
+  39: "cross hands"
+  42: "falling"
+  50: "kicking other person"
+  54: "hugging other person"
 
 # log
 save_interval: 5

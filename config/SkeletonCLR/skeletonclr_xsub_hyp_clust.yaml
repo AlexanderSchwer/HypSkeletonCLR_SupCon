@@ -1,20 +1,20 @@
-work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/3views_c005_cosann_no_clust
+work_dir: work_dir/skeletonclr/1_xsub_frame50_channel16_epoch300_cross150/c005_cosann_hyp_clust
 
-#weights: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/unsupervised/epoch150_model.pt
+#weights: work_dir/skeletonclr/1_xsub_frame50_channel16_epoch300_cross150/unsupervised/epoch150_model.pt
 #ignore_weights: [encoder_q.fc, encoder_q_motion.fc, encoder_q_bone.fc, encoder_k, encoder_k_motion, encoder_k_bone, queue, queue_motion, queue_bone]
 
 # feeder
 train_feeder: feeder.ntu_feeder.Feeder_dual
 dataset_root: ''
 train_feeder_args:
-  data_path: xview/train_data.npy
-  label_path: xview/train_label.pkl
+  data_path: xsub/train_data.npy
+  label_path: xsub/train_label.pkl
   shear_amplitude: 0.5
   temperal_padding_ratio: 6
   mmap: True
 
 # model
-model: net.skeletonclr_3views.SkeletonCLR_3views
+model: net.skeletonclr.SkeletonCLR
 model_args:
   base_encoder: net.st_gcn.Model
   pretrain: True
@@ -33,8 +33,8 @@ model_args:
     strategy: 'spatial'
   edge_importance_weighting: True
   curvature: 1.0
-  cluster_enabled: False
-  num_clusters: 60
+  cluster_enabled: True
+  num_clusters: 5
   sinkhorn_tau: 0.1
   sinkhorn_iters: 20
   sinkhorn_eps: 0.05
@@ -57,14 +57,14 @@ test_batch_size: 128
 num_epoch: 300
 start_epoch: 0
 
-view: 'all'
+view: 'joint'
 
 # supervised training
 sup_epoch: 301
 temperature: 0.07
 curvature: 1.0
-lambda_sink: 0.0
-lambda_hier: 0.0
+lambda_sink: 1.0
+lambda_hier: 0.2
 hier_update_interval: 200
 hier_warmup_steps: 1000
 hier_triplets: 512
