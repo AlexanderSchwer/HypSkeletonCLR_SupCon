@@ -6,14 +6,14 @@ ignore_weights: [encoder_q.fc, encoder_q_motion.fc, encoder_q_bone.fc, encoder_k
 # feeder
 train_feeder: feeder.ntu_feeder.Feeder_single
 train_feeder_args:
-  data_path: xview/train_data.npy
+  data_path: xview/train_position.npy
   label_path: xview/train_label.pkl
   shear_amplitude: -1
   temperal_padding_ratio: -1
   mmap: True
 test_feeder: feeder.ntu_feeder.Feeder_single
 test_feeder_args:
-  data_path: xview/val_data.npy
+  data_path: xview/val_position.npy
   label_path: xview/val_label.pkl
   shear_amplitude: -1
   temperal_padding_ratio: -1

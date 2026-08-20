@@ -7,7 +7,7 @@ work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/c005_
 train_feeder: feeder.ntu_feeder.Feeder_dual
 dataset_root: ''
 train_feeder_args:
-  data_path: xview/train_data.npy
+  data_path: xview/train_position.npy
   label_path: xview/train_label.pkl
   shear_amplitude: 0.5
   temperal_padding_ratio: 6
