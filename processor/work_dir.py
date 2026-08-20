@@ -218,6 +218,10 @@ def _infer_frame_count(paths):
         match = re.search(r'frame[_-]?(\d+)|frame(\d+)', value.lower())
         if match:
             return match.group(1) or match.group(2)
+    for value in paths:
+        normalized = value.lower().replace('\\', '/')
+        if re.search(r'(^|/)(train|val|test)_(position|motion)\.npy$', normalized):
+            return '50'
     return None
 
 
