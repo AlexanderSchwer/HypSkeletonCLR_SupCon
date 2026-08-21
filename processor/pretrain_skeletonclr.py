@@ -59,43 +59,10 @@ class SkeletonCLR_Processor(PT_Processor):
                 self._wandb_run = init_wandb_from_work_dir(
                     self.arg,
                     job_type="pretrain",
+                    config=vars(self.arg),
                 )
                 if self._wandb_run is not None and self._wandb_run.dir:
                     self._wandb_run_dir = os.path.dirname(self._wandb_run.dir)
-                model_args = self.arg.model_args if isinstance(self.arg.model_args, dict) else {}
-                wandb.config.update({
-                    "learning_rate": self.arg.base_lr,
-                    "optimizer": self.arg.optimizer,
-                    "weight_decay": self.arg.weight_decay,
-                    "nesterov": self.arg.nesterov,
-                    "num_epochs": self.arg.num_epoch,
-                    "sup_epoch": self.arg.sup_epoch,
-                    "temperature": self.arg.temperature,
-                    "curvature": self.arg.curvature,
-                    "cluster_enabled": bool(model_args.get("cluster_enabled", False)),
-                    "num_clusters": model_args.get("num_clusters", None),
-                    "sinkhorn_tau": model_args.get("sinkhorn_tau", None),
-                    "sinkhorn_iters": model_args.get("sinkhorn_iters", None),
-                    "sinkhorn_eps": model_args.get("sinkhorn_eps", None),
-                    "lambda_sink": self.arg.lambda_sink,
-                    "lambda_hier": self.arg.lambda_hier,
-                    "cluster_warmup_steps": self.arg.cluster_warmup_steps,
-                    "cluster_ramp_steps": self.arg.cluster_ramp_steps,
-                    "cluster_distance_log_interval": self.arg.cluster_distance_log_interval,
-                    "cluster_distance_matrix_max_clusters": self.arg.cluster_distance_matrix_max_clusters,
-                    "hier_warmup_steps": self.arg.hier_warmup_steps,
-                    "hier_ramp_steps": self.arg.hier_ramp_steps,
-                    "embedding_plot_interval": self.arg.embedding_plot_interval,
-                    "embedding_plot_max_samples": self.arg.embedding_plot_max_samples,
-                    "embedding_plot_methods": self.arg.embedding_plot_methods,
-                    "embedding_plot_selected_labels": self.arg.embedding_plot_selected_labels,
-                    "embedding_plot_color_by": self.arg.embedding_plot_color_by,
-                    "embedding_plot_class_groups": self.arg.embedding_plot_class_groups,
-                    "embedding_plot_class_names": self.arg.embedding_plot_class_names,
-                    "embedding_plot_hierarchy": self.arg.embedding_plot_hierarchy,
-                    "embedding_plot_hierarchy_linkages": self.arg.embedding_plot_hierarchy_linkages,
-                    "embedding_plot_hierarchy_log_max_merges": self.arg.embedding_plot_hierarchy_log_max_merges,
-                })
             except Exception as exc:
                 self._wandb_ok = False
                 print(f"W&B disabled during init due to error: {exc}")

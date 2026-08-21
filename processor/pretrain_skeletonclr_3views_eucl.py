@@ -38,14 +38,8 @@ class SkeletonCLR_3views_Eucl_Processor(PT_Processor):
         init_wandb_from_work_dir(
             self.arg,
             job_type="pretrain",
+            config=vars(self.arg),
         )
-        wandb.config.update({
-            "learning_rate": self.arg.base_lr,
-            "optimizer": self.arg.optimizer,
-            "weight_decay": self.arg.weight_decay,
-            "nesterov": self.arg.nesterov,
-            "num_epochs": self.arg.num_epoch,
-        })
 
     def train(self, epoch):
         self.model.train()
