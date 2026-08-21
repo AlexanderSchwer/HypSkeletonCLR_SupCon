@@ -59,7 +59,6 @@ class SkeletonCLR_Processor(PT_Processor):
                 self._wandb_run = init_wandb_from_work_dir(
                     self.arg,
                     job_type="pretrain",
-                    config=vars(self.arg),
                 )
                 if self._wandb_run is not None and self._wandb_run.dir:
                     self._wandb_run_dir = os.path.dirname(self._wandb_run.dir)

@@ -37,7 +37,6 @@ class SkeletonCLR_Processor(PT_Processor):
         init_wandb_from_work_dir(
             self.arg,
             job_type="pretrain",
-            config=vars(self.arg),
         )
         wandb.config.update({
             "learning_rate": self.arg.base_lr,

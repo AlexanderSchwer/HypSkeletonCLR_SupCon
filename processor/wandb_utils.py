@@ -20,8 +20,9 @@ def init_wandb_from_work_dir(arg, job_type=None, config=None, **kwargs):
     init_kwargs = {
         'project': os.environ.get('WANDB_PROJECT', DEFAULT_WANDB_PROJECT),
         'name': name,
-        'config': vars(arg) if config is None else config,
     }
+    if config is not None:
+        init_kwargs['config'] = config
     if group:
         init_kwargs['group'] = group
     if job_type:
