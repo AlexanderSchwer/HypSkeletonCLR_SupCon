@@ -113,11 +113,32 @@ class TrainingWorkDirTest(unittest.TestCase):
                 'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
                 'hyptorch-c1-lrb0p05-multistep'))
 
+    def test_canonical_uses_skeletonclr_3views_model_family(self):
+        arg = Namespace(
+            work_dir='work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/3views_c005_cosann',
+            config='config/SkeletonCLR/skeletonclr_3views_xview.yaml',
+            model='net.skeletonclr_3views.SkeletonCLR_3views',
+            model_args={'num_class': 60, 'hidden_channels': 16, 'curvature': 1.0},
+            train_feeder_args={'data_path': 'xview/train_position.npy'},
+            test_feeder_args={},
+            base_lr=0.01,
+            step=[],
+            lr_scheduler='cosine',
+        )
+
+        resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_3views_Processor')
+
+        self.assertEqual(
+            resolved,
+            os.path.normpath(
+                'work_dir/skeletonclr_3views/ntu60-xview-frame50-hc16/'
+                'geoopt-c1-lrb0p01-cosine'))
+
     def test_canonical_omits_geometry_and_curvature_for_euclidean_run(self):
         arg = Namespace(
             work_dir='work_dir/skeletonclr',
-            config='config/SkeletonCLR/skeletonclr_3views_xview_eucl.yaml',
-            model='net.skeletonclr_3views_eucl.SkeletonCLR',
+            config='config/SkeletonCLR/skeletonclr_eucl_3views_xview.yaml',
+            model='net.skeletonclr_3views_eucl.SkeletonCLR_3views_Eucl',
             model_args={'num_class': 60, 'hidden_channels': 16, 'curvature': 1.0},
             train_feeder_args={'data_path': 'xview/train_position.npy'},
             test_feeder_args={},
@@ -130,7 +151,7 @@ class TrainingWorkDirTest(unittest.TestCase):
         self.assertEqual(
             resolved,
             os.path.normpath(
-                'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
+                'work_dir/skeletonclr_3views_eucl/ntu60-xview-frame50-hc16/'
                 'lrb0p05-multistep'))
 
     def test_canonical_preserves_absolute_work_dir_root(self):

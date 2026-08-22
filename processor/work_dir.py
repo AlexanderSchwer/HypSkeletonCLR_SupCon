@@ -12,7 +12,23 @@ _RUN_FAMILIES = (
     'crossclr',
     'linear_eval',
     'plotting',
+    'skeletonclr_3views_eucl',
+    'skeletonclr_eucl_3views',
+    'skeletonclr_3views',
+    'skeletonclr_hyptorch',
+    'skeletonclr_gradfix',
+    'skeletonclr_eucl',
+    'skeletonclr_att',
     'skeletonclr',
+)
+
+_SKELETONCLR_FAMILY_ALIASES = (
+    ('skeletonclr_3views_eucl', 'skeletonclr_3views_eucl'),
+    ('skeletonclr_eucl_3views', 'skeletonclr_3views_eucl'),
+    ('skeletonclr_3views', 'skeletonclr_3views'),
+    ('skeletonclr_gradfix', 'skeletonclr_gradfix'),
+    ('skeletonclr_eucl', 'skeletonclr_eucl'),
+    ('skeletonclr_att', 'skeletonclr_att'),
 )
 
 
@@ -115,6 +131,9 @@ def _infer_run_family(arg, processor_name=None):
         return 'linear_eval'
     if 'plot' in haystack:
         return 'plotting'
+    for needle, family in _SKELETONCLR_FAMILY_ALIASES:
+        if needle in haystack:
+            return family
     if 'skeletonclr' in haystack:
         return 'skeletonclr'
     return 'training'
