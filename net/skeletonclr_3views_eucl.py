@@ -2,11 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlight import import_class
-# HYP: libraries
-import geoopt as gt
-import geoopt.manifolds.stereographic.math as pmath 
-
-#import tools.hyptorch.pmath as pmath
 
 class SkeletonCLR_3views_Eucl(nn.Module):
     """ Referring to the code of MOCO, https://arxiv.org/abs/1911.05722 """
@@ -191,10 +186,6 @@ class SkeletonCLR_3views_Eucl(nn.Module):
             im_q_bone[:, :, :, v1 - 1, :] = im_q[:, :, :, v1 - 1, :] - im_q[:, :, :, v2 - 1, :]
 
         if not self.pretrain:
-            """
-            Linear evaluation:
-                perform same projections as in pretraining
-            """
             if view == 'joint':
                 return self.encoder_q(im_q)
             elif view == 'motion':
@@ -205,11 +196,7 @@ class SkeletonCLR_3views_Eucl(nn.Module):
                 return (self.encoder_q(im_q) + self.encoder_q_motion(im_q_motion) + self.encoder_q_bone(im_q_bone)) / 3.
             else:
                 raise ValueError
-        
-        """
-        Pretraining:
-            project features to poincare ball in hyperbolic space
-        """
+
         im_k_motion = torch.zeros_like(im_k)
         im_k_motion[:, :, :-1, :, :] = im_k[:, :, 1:, :, :] - im_k[:, :, :-1, :, :]
 
@@ -268,10 +255,8 @@ class SkeletonCLR_3views_Eucl(nn.Module):
         labels = torch.zeros(logits.shape[0], dtype=torch.long).cuda()
 
         # dequeue and enqueue
-        #self._dequeue_and_enqueue(k)
         self._dequeue_and_enqueue(k)
         self._dequeue_and_enqueue_motion(k_motion)
         self._dequeue_and_enqueue_bone(k_bone)
 
         return logits, logits_motion, logits_bone, labels
-        

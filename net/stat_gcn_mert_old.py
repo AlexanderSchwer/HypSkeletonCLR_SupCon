@@ -236,8 +236,6 @@ class st_gcn(nn.Module):
 
         res = self.residual(x)
         x, A = self.gcn(x, A)
-        #x = self.spatial_attn(x, A)
-        #x = self.temporal_attn(x)
         x = x + self.spatial_attn(x, A)
         x = x + self.temporal_attn(x)
         x = self.tcn(x) + res

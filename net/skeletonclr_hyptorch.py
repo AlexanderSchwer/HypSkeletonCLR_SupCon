@@ -1,9 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchlight import import_class
-
-import tools.hyptorch.pmath as pmath
 
 import tools.hyptorch.nn as hypnn
 
@@ -68,7 +65,6 @@ class SkeletonCLRHyptorch(nn.Module):
                 param_k.data.copy_(param_q.data)    # initialize
                 param_k.requires_grad = False       # not update by gradient
             
-            #self.tp = hypnn.ToPoincare(c=curvature, train_x=train_x, train_c=train_c, ball_dim=dim_fc_out, riemannian=False) # no RSGD
             self.tp = hypnn.ToPoincare(c=curvature, train_x=train_x, train_c=train_c, ball_dim=dim_fc_out)
             self.hyperbolic_dis = hypnn.HyperbolicDistanceLayer(c=curvature)
 
@@ -123,7 +119,6 @@ class SkeletonCLRHyptorch(nn.Module):
         if not self.pretrain:
             return self.encoder_q(im_q)
 
-        #q_hyp_p = self.encoder_q(im_q)  # queries: NxC
         q_hyp_c = self.encoder_q(im_q)  # queries: NxC
 
         if self.decoupled:

@@ -2,12 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlight import import_class
-# HYP: libraries
 import geoopt as gt
-import geoopt.manifolds.stereographic.math as pmath 
 from tools.sinkhorn import sinkhorn_balanced_probabilities
-
-#import tools.hyptorch.pmath as pmath
 
 class SkeletonCLR(nn.Module):
     """ Referring to the code of MOCO, https://arxiv.org/abs/1911.05722 """
@@ -114,34 +110,13 @@ class SkeletonCLR(nn.Module):
             im_q: a batch of query images
             im_k: a batch of key images
         """
-        # HYP: Initialize the Poincaré ball manifold
-        poincare_ball = gt.PoincareBall(self.c)
-
         if cross:
             return self.cross_training(im_q, im_k, topk, context)
 
         if not self.pretrain:
-            """
-            Linear evaluation:
-                perform same projections as in pretraining
-            """
-            #im_q = poincare_ball.expmap0(im_q)
-            
-            #im_q = poincare_ball.logmap0(im_q)
-
-            #q = self.encoder_q(im_q)
-            #q = poincare_ball.expmap0(q)
-
-            #q = F.normalize(q, dim=1)
-            #return q
             return self.encoder_q(im_q)
-        
-        """
-        Pretraining:
-            project features to poincare ball in hyperbolic space
-        """
-        #im_q = poincare_ball.expmap0(im_q)
-        #im_q = poincare_ball.logmap0(im_q)
+
+        poincare_ball = gt.PoincareBall(self.c)
 
         # compute query features
         q_e = self.encoder_q(im_q)  # queries shape: [batch_size, feature_dim]
@@ -151,9 +126,6 @@ class SkeletonCLR(nn.Module):
         # compute key features
         with torch.no_grad():  # no gradient to keys
             self._momentum_update_key_encoder()  # update the key encoder
-
-            #im_k = poincare_ball.expmap0(im_k)
-            #im_k = poincare_ball.logmap0(im_k)
 
             # compute key features
             k_e = self.encoder_k(im_k)  # keys shape: [batch_size, feature_dim]
@@ -183,12 +155,7 @@ class SkeletonCLR(nn.Module):
         # Combine q (query) and k (key) as two views of the same image
         features = torch.cat([q_h.unsqueeze(1), k_h.unsqueeze(1)], dim=1)  # features shape: [batch_size, n_views, feature_dim], with n_views=2 (q and k)
 
-        #queue = poincare_ball.expmap0(self.queue.clone().detach().T).unsqueeze(0) # sh [1, queue_size, feature_dim]
-        #queue_reshaped = queue.expand(q.shape[0], -1, -1) # [batch_size, queue_size, feature_dim]
-        #features = torch.cat([q.unsqueeze(1), queue_reshaped], dim=1) # features shape: [batch_size, n_views, feature_dim], with n_views=1+queue_size (q and queue)
-        
         # dequeue and enqueue
-        #self._dequeue_and_enqueue(k)
         self._dequeue_and_enqueue(k_eucl)
 
         if self.cluster_enabled:

@@ -2,12 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlight import import_class
-# HYP: libraries
 import geoopt as gt
-import geoopt.manifolds.stereographic.math as pmath 
 from tools.sinkhorn import sinkhorn_balanced_probabilities
-
-#import tools.hyptorch.pmath as pmath
 
 class SkeletonCLR_3views(nn.Module):
     """ Referring to the code of MOCO, https://arxiv.org/abs/1911.05722 """
@@ -201,9 +197,6 @@ class SkeletonCLR_3views(nn.Module):
             im_q: a batch of query images
             im_k: a batch of key images
         """
-        # HYP: Initialize the Poincaré ball manifold
-        poincare_ball = gt.PoincareBall(self.c)
-
         if cross:
             return self.cross_training(im_q, im_k, topk, context)
 
@@ -215,10 +208,6 @@ class SkeletonCLR_3views(nn.Module):
             im_q_bone[:, :, :, v1 - 1, :] = im_q[:, :, :, v1 - 1, :] - im_q[:, :, :, v2 - 1, :]
 
         if not self.pretrain:
-            """
-            Linear evaluation:
-                perform same projections as in pretraining
-            """
             if view == 'joint':
                 return self.encoder_q(im_q)
             elif view == 'motion':
@@ -229,11 +218,8 @@ class SkeletonCLR_3views(nn.Module):
                 return (self.encoder_q(im_q) + self.encoder_q_motion(im_q_motion) + self.encoder_q_bone(im_q_bone)) / 3.
             else:
                 raise ValueError
-        
-        """
-        Pretraining:
-            project features to poincare ball in hyperbolic space
-        """
+
+        poincare_ball = gt.PoincareBall(self.c)
         im_k_motion = torch.zeros_like(im_k)
         im_k_motion[:, :, :-1, :, :] = im_k[:, :, 1:, :, :] - im_k[:, :, :-1, :, :]
 
@@ -312,7 +298,6 @@ class SkeletonCLR_3views(nn.Module):
         labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
 
         # dequeue and enqueue
-        #self._dequeue_and_enqueue(k)
         self._dequeue_and_enqueue(k_eucl)
         self._dequeue_and_enqueue_motion(k_motion_eucl)
         self._dequeue_and_enqueue_bone(k_bone_eucl)

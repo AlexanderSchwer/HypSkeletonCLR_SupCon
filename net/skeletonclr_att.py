@@ -2,11 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlight import import_class
-# HYP: libraries
 import geoopt as gt
-import geoopt.manifolds.stereographic.math as pmath 
-
-#import tools.hyptorch.pmath as pmath
 
 class SkeletonCLR_Att(nn.Module):
     """ Referring to the code of MOCO, https://arxiv.org/abs/1911.05722 """
@@ -94,23 +90,13 @@ class SkeletonCLR_Att(nn.Module):
             im_q: a batch of query images
             im_k: a batch of key images
         """
-        # HYP: Initialize the Poincaré ball manifold
-        poincare_ball = gt.PoincareBall(self.c)
-
         if cross:
             return self.cross_training(im_q, im_k, topk, context)
 
         if not self.pretrain:
-            """
-            Linear evaluation:
-                perform same projections as in pretraining
-            """
             return self.encoder_q(im_q)
-        
-        """
-        Pretraining:
-            project features to poincare ball in hyperbolic space
-        """
+
+        poincare_ball = gt.PoincareBall(self.c)
         # compute query features
         q, q_sp_attns, q_tp_attns = self.encoder_q(im_q)  # queries shape: [batch_size, feature_dim]
         q = F.normalize(q, dim=1)
@@ -155,4 +141,3 @@ class SkeletonCLR_Att(nn.Module):
         self._dequeue_and_enqueue(k_eucl)
 
         return logits, labels, features, sp_att, tp_att
-        

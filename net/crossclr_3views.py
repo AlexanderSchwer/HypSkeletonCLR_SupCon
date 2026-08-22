@@ -2,9 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlight import import_class
-# HYP: libraries
 import geoopt as gt
-import geoopt.manifolds.stereographic.math as pmath 
 
 class CrosSCLR(nn.Module):
     """ Referring to the code of MOCO, https://arxiv.org/abs/1911.05722 """
@@ -249,7 +247,6 @@ class CrosSCLR(nn.Module):
         # negative logits: NxK
         # HYP: Transpose self.queue to match dimensions for pairwise comparison (N, K)
         queue = self.queue.clone().detach().T
-        #queue = poincare_ball.expmap0(queue) # THIS MIGHT BE WRONG, QUEUE IS BASED ON K WHICH IS ALREADY IN HYPERBOLIC SPACE!
         # Expand q and queue to compute pairwise distances
         q_expanded = q.unsqueeze(1)             # Shape (N, 1, C)
         queue_expanded = queue.unsqueeze(0)     # Shape (1, K, C)
@@ -263,7 +260,6 @@ class CrosSCLR(nn.Module):
         l_pos_bone = -poincare_ball.dist(q_bone, k_bone).unsqueeze(-1)
         # HYP: Transpose self.queue to match dimensions for pairwise comparison (N, K)
         queue_bone = self.queue_bone.clone().detach().T
-        #queue_bone = poincare_ball.expmap0(queue_bone) 
         # Expand q and queue to compute pairwise distances
         q_bone_expanded = q_bone.unsqueeze(1)             # Shape (N, 1, C)
         queue_bone_expanded = queue_bone.unsqueeze(0)     # Shape (1, K, C)
@@ -342,7 +338,6 @@ class CrosSCLR(nn.Module):
         
         # HYP: Transpose self.queue to match dimensions for pairwise comparison (N, K)
         queue = self.queue.clone().detach().T
-        #queue = poincare_ball.expmap0(queue) # THIS MIGHT BE WRONG, QUEUE IS BASED ON K WHICH IS ALREADY IN HYPERBOLIC SPACE!
         # Expand q and queue to compute pairwise distances
         q_expanded = q.unsqueeze(1)             # Shape (N, 1, C)
         queue_expanded = queue.unsqueeze(0)     # Shape (1, K, C)
@@ -356,7 +351,6 @@ class CrosSCLR(nn.Module):
         l_pos_bone = -poincare_ball.dist(q_bone, k_bone).unsqueeze(-1)
         # HYP: Transpose self.queue to match dimensions for pairwise comparison (N, K)
         queue_bone = self.queue_bone.clone().detach().T
-        #queue_bone = poincare_ball.expmap0(queue_bone) 
         # Expand q and queue to compute pairwise distances
         q_bone_expanded = q_bone.unsqueeze(1)             # Shape (N, 1, C)
         queue_bone_expanded = queue_bone.unsqueeze(0)     # Shape (1, K, C)

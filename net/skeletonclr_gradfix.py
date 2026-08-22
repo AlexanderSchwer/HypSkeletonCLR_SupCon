@@ -2,9 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlight import import_class
-# HYP: libraries
-import geoopt as gt
-import geoopt.manifolds.stereographic.math as pmath 
 
 import tools.pmath as pmath
 
@@ -100,10 +97,6 @@ class SkeletonCLR(nn.Module):
         if not self.pretrain:
             return self.encoder_q(im_q)
 
-        # HYP: Initialize the Poincaré ball manifold
-        #ball_dim = self.encoder_q.fc.weight.shape[0]
-        #xp = torch.zeros((ball_dim,))
-
         grad_fix = lambda x: pmath.RiemannianGradient.apply(x)
 
         # compute query features
@@ -120,7 +113,6 @@ class SkeletonCLR(nn.Module):
             k = grad_fix(pmath.project(pmath.expmap0(k)))
 
         # compute logits
-        # Einstein sum is more intuitive
         # positive logits: Nx1
         l_pos = -pmath.dist(q, k, keepdim=True)
         # negative logits: NxK
@@ -145,4 +137,3 @@ class SkeletonCLR(nn.Module):
         self._dequeue_and_enqueue(k)
 
         return logits, labels, features
-        

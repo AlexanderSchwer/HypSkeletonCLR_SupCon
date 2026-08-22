@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import numpy as np
-
 from net.utils.tgcn import ConvTemporalGraphical
 from net.utils.graph import Graph
 
