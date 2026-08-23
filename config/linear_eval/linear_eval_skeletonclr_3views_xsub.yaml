@@ -41,7 +41,7 @@ model_args:
   curvature: 1.0
 
 # optim
-nesterov: True # False?
+nesterov: True
 weight_decay: 0.0
 base_lr: 8.
 optimizer: SGD
