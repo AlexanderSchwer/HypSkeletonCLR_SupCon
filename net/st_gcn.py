@@ -7,7 +7,12 @@ from net.utils.graph import Graph
 
 
 class Model(nn.Module):
-    r"""Spatial temporal graph convolutional networks."""
+    r"""Spatial temporal graph convolutional networks.
+
+    Input tensors use (N, C, T, V, M):
+        N = batch size, C = input channels, T = frames,
+        V = graph nodes/joints, M = people/person instances.
+    """
 
     def __init__(self, in_channels, hidden_channels, hidden_dim, num_class, graph_args,
                  edge_importance_weighting, **kwargs):
@@ -16,12 +21,15 @@ class Model(nn.Module):
         # load graph
         self.graph = Graph(**graph_args)
         A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
+        # A stores the graph partitions as (K, V, V):
+        # K = spatial kernel partitions, V = number of skeleton joints.
         self.register_buffer('A', A)
 
         # build networks
-        spatial_kernel_size = A.size(0)
+        spatial_kernel_size = A.size(0)  # K
         temporal_kernel_size = 9
         kernel_size = (temporal_kernel_size, spatial_kernel_size)
+        # BatchNorm1d sees each joint-channel pair as a feature: (N*M, V*C, T).
         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
         kwargs0 = {k: v for k, v in kwargs.items() if k != 'dropout'}
         self.st_gcn_networks = nn.ModuleList((
@@ -41,6 +49,7 @@ class Model(nn.Module):
         # initialize parameters for edge importance weighting
         if edge_importance_weighting:
             self.edge_importance = nn.ParameterList([
+                # One learnable (K, V, V) mask per ST-GCN block.
                 nn.Parameter(torch.ones(self.A.size()))
                 for i in self.st_gcn_networks
             ])
@@ -51,20 +60,26 @@ class Model(nn.Module):
     def forward(self, x):
 
         # data normalization
-        N, C, T, V, M = x.size()
+        N, C, T, V, M = x.size()  # (batch, channels, frames, joints, persons)
         x = x.permute(0, 4, 3, 1, 2).contiguous()
+        # Move persons into the batch axis and flatten joints/channels.
         x = x.view(N * M, V * C, T)
         x = self.data_bn(x)
         x = x.view(N, M, V, C, T)
         x = x.permute(0, 1, 3, 4, 2).contiguous()
+        # Graph convolution expects (batch, channels, frames, joints).
         x = x.view(N * M, C, T, V)
 
         # forward
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
+            # x: (N*M, C_in, T, V); A*importance: (K, V, V).
+            # Blocks may change channels and downsample T, but V stays fixed.
             x, _ = gcn(x, self.A * importance)
 
         # global pooling
+        # Average over the remaining frame and joint axes: (N*M, C_out, 1, 1).
         x = F.avg_pool2d(x, x.size()[2:])
+        # Restore the person axis and average features over people: (N, C_out).
         x = x.view(N, M, -1).mean(dim=1)
 
         # prediction
@@ -110,11 +125,16 @@ class st_gcn(nn.Module):
 
         assert len(kernel_size) == 2
         assert kernel_size[0] % 2 == 1
+        # kernel_size = (temporal_kernel_size, spatial_kernel_size=K).
+        # Temporal padding preserves T when stride=1; joints are not padded.
         padding = ((kernel_size[0] - 1) // 2, 0)
 
+        # Spatial graph convolution over joints V with adjacency A: (K, V, V).
         self.gcn = ConvTemporalGraphical(in_channels, out_channels,
                                          kernel_size[1])
 
+        # Temporal convolution uses a (time, joint) kernel of (kernel_size[0], 1),
+        # so it slides across frames T independently for each joint V.
         self.tcn = nn.Sequential(
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
@@ -133,9 +153,11 @@ class st_gcn(nn.Module):
             self.residual = lambda x: 0
 
         elif (in_channels == out_channels) and (stride == 1):
+            # Identity residual keeps shape (N, C, T, V).
             self.residual = lambda x: x
 
         else:
+            # Projection residual matches changed channels and/or downsampled T.
             self.residual = nn.Sequential(
                 nn.Conv2d(
                     in_channels,
@@ -148,7 +170,9 @@ class st_gcn(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x, A):
+        # x: (N, C_in, T, V), A: (K, V, V).
         res = self.residual(x)
+        # After gcn: (N, C_out, T, V); after tcn: (N, C_out, T_out, V).
         x, A = self.gcn(x, A)
         x = self.tcn(x) + res
 
