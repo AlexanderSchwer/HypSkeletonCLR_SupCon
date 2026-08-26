@@ -15,6 +15,13 @@ from sklearn.manifold import TSNE
 from sklearn.preprocessing import normalize
 from sklearn.utils.validation import check_array
 
+from tools.action_label_hierarchy import (
+    get_hierarchy,
+    hierarchy_class_names,
+    hierarchy_leaf_groups,
+    hierarchy_to_nested_dict,
+)
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -108,6 +115,7 @@ def render_embedding_diagnostics(
     color_by=DEFAULT_COLOR_BY,
     class_groups=None,
     class_names=None,
+    class_hierarchy=None,
     dataset_size=None,
     split_name=None,
     render_class_hierarchy=True,
@@ -123,8 +131,8 @@ def render_embedding_diagnostics(
     embeddings = _as_numpy_2d(embeddings, "embeddings")
     labels = np.asarray(labels)
     collected_sample_count = int(embeddings.shape[0])
-    class_groups = _normalize_class_groups(class_groups)
-    class_names = _normalize_class_names(class_names)
+    class_groups = _normalize_class_groups(class_groups, class_hierarchy=class_hierarchy)
+    class_names = _normalize_class_names(class_names, class_hierarchy=class_hierarchy)
     finite_sample_mask = np.isfinite(embeddings).all(axis=1)
     if not finite_sample_mask.all():
         embeddings = embeddings[finite_sample_mask]
@@ -254,7 +262,7 @@ def render_embedding_diagnostics(
                     output_dir,
                     f"epoch_{epoch:04d}_{hierarchy['linkage_method']}_class_hierarchy.png",
                 )
-                _plot_class_hierarchy(
+                plot_class_hierarchy(
                     hierarchy,
                     save_path=hierarchy_path,
                     epoch=epoch,
@@ -267,6 +275,30 @@ def render_embedding_diagnostics(
                 print(
                     "Skipping class hierarchy '{}' for epoch {}: {}".format(
                         hierarchy_linkage,
+                        epoch,
+                        exc,
+                    )
+                )
+
+        if class_hierarchy:
+            try:
+                reference_hierarchy_path = os.path.join(
+                    output_dir,
+                    f"epoch_{epoch:04d}_{_safe_plot_token(class_hierarchy)}_reference_class_hierarchy.png",
+                )
+                plot_class_hierarchy(
+                    class_hierarchy,
+                    save_path=reference_hierarchy_path,
+                    epoch=epoch,
+                    class_groups=class_groups,
+                    class_names=class_names,
+                    metadata_text=metadata_text,
+                )
+                created_paths.append(reference_hierarchy_path)
+            except Exception as exc:
+                print(
+                    "Skipping reference class hierarchy '{}' for epoch {}: {}".format(
+                        class_hierarchy,
                         epoch,
                         exc,
                     )
@@ -353,6 +385,7 @@ def format_class_hierarchy(
     selected_labels=None,
     class_groups=None,
     class_names=None,
+    class_hierarchy=None,
     linkage_method="ward_tangent",
     max_merges=20,
 ):
@@ -363,8 +396,8 @@ def format_class_hierarchy(
         selected_labels=selected_labels,
         linkage_method=linkage_method,
     )
-    class_groups = _normalize_class_groups(class_groups)
-    class_names = _normalize_class_names(class_names)
+    class_groups = _normalize_class_groups(class_groups, class_hierarchy=class_hierarchy)
+    class_names = _normalize_class_names(class_names, class_hierarchy=class_hierarchy)
     return _format_hierarchy_merge_table(
         hierarchy,
         class_groups=class_groups,
@@ -380,6 +413,7 @@ def format_class_hierarchies(
     selected_labels=None,
     class_groups=None,
     class_names=None,
+    class_hierarchy=None,
     linkage_methods=None,
     max_merges=20,
 ):
@@ -393,11 +427,37 @@ def format_class_hierarchies(
                 selected_labels=selected_labels,
                 class_groups=class_groups,
                 class_names=class_names,
+                class_hierarchy=class_hierarchy,
                 linkage_method=linkage_method,
                 max_merges=max_merges,
             )
         )
     return "\n".join(tables)
+
+
+def plot_class_hierarchy(
+    hierarchy,
+    save_path,
+    epoch=None,
+    class_groups=None,
+    class_names=None,
+    class_hierarchy=None,
+    metadata_text=None,
+    title=None,
+):
+    if isinstance(hierarchy, str):
+        class_hierarchy = hierarchy
+    class_groups = _normalize_class_groups(class_groups, class_hierarchy=class_hierarchy)
+    class_names = _normalize_class_names(class_names, class_hierarchy=class_hierarchy)
+    plot_data = _hierarchy_to_dendrogram_data(hierarchy, class_names)
+    _plot_class_hierarchy_dendrogram(
+        plot_data,
+        save_path=save_path,
+        epoch=epoch,
+        class_groups=class_groups,
+        metadata_text=metadata_text,
+        title=title,
+    )
 
 
 def _as_numpy_2d(values, name):
@@ -562,8 +622,17 @@ def _normalize_rows(points):
     return normalize(points, axis=1)
 
 
-def _normalize_class_groups(class_groups):
-    groups = class_groups or DEFAULT_HIERARCHY_GROUPS
+def _normalize_class_groups(class_groups, class_hierarchy=None):
+    if class_groups:
+        groups = class_groups
+    elif class_hierarchy:
+        groups = hierarchy_leaf_groups(class_hierarchy, identifier="class_id")
+        if not groups:
+            raise ValueError(
+                f"Hierarchy '{class_hierarchy}' does not provide numeric class ids."
+            )
+    else:
+        groups = DEFAULT_HIERARCHY_GROUPS
     normalized = OrderedDict()
     for group_name, group_classes in groups.items():
         labels = parse_selected_labels(group_classes, default=None)
@@ -571,9 +640,9 @@ def _normalize_class_groups(class_groups):
     return normalized
 
 
-def _normalize_class_names(class_names):
+def _normalize_class_names(class_names, class_hierarchy=None):
     if not class_names:
-        return {}
+        return hierarchy_class_names(class_hierarchy) if class_hierarchy else {}
     if isinstance(class_names, (list, tuple)):
         return {
             index: str(name)
@@ -939,74 +1008,238 @@ def _class_tangent_prototypes(embeddings, labels, curvature):
     )
 
 
-def _plot_class_hierarchy(
-    hierarchy,
+def _hierarchy_to_dendrogram_data(hierarchy, class_names):
+    if isinstance(hierarchy, str):
+        record = get_hierarchy(hierarchy)
+        return _reference_hierarchy_to_dendrogram_data(
+            hierarchy_to_nested_dict(record["name"]),
+            name=record["name"],
+            class_names=class_names,
+        )
+
+    if not isinstance(hierarchy, dict):
+        raise ValueError("hierarchy must be a stored hierarchy name or hierarchy dictionary.")
+
+    if "linkage_matrix" in hierarchy:
+        return _learned_hierarchy_to_dendrogram_data(hierarchy, class_names)
+
+    if "tree" in hierarchy:
+        return _reference_hierarchy_to_dendrogram_data(
+            hierarchy["tree"],
+            name=hierarchy.get("name", "reference"),
+            class_names=class_names,
+        )
+
+    return _reference_hierarchy_to_dendrogram_data(
+        hierarchy,
+        name=hierarchy.get("name", "reference"),
+        class_names=class_names,
+    )
+
+
+def _learned_hierarchy_to_dendrogram_data(hierarchy, class_names):
+    class_ids = [int(class_id) for class_id in hierarchy["class_ids"]]
+    class_counts = [int(class_count) for class_count in hierarchy["class_counts"]]
+    linkage_matrix = np.asarray(hierarchy["linkage_matrix"], dtype=np.float64)
+    return {
+        "kind": "learned",
+        "linkage_matrix": linkage_matrix,
+        "leaf_labels": [
+            _class_hierarchy_leaf_label(class_id, class_count, class_names)
+            for class_id, class_count in zip(class_ids, class_counts)
+        ],
+        "leaf_class_ids": class_ids,
+        "linkage_method": hierarchy["linkage_method"],
+        "distance_description": hierarchy["distance_description"],
+    }
+
+
+def _reference_hierarchy_to_dendrogram_data(hierarchy, name, class_names):
+    leaves = _reference_hierarchy_leaves(hierarchy)
+    if len(leaves) < 2:
+        raise ValueError("Class hierarchy plot needs at least two leaves.")
+
+    leaf_indices = {
+        id(leaf): index
+        for index, leaf in enumerate(leaves)
+    }
+    leaf_labels = [
+        _reference_hierarchy_leaf_label(leaf, class_names)
+        for leaf in leaves
+    ]
+    leaf_class_ids = [
+        None if leaf.get("class_id") is None else int(leaf["class_id"])
+        for leaf in leaves
+    ]
+    linkage_rows = []
+    leaf_count = len(leaves)
+
+    def convert_node(node):
+        children = list(node.get("children", []))
+        if not children:
+            return leaf_indices[id(node)], 1, 0.0
+
+        child_clusters = [convert_node(child) for child in children]
+        node_height = 1.0 + max(child_height for _, _, child_height in child_clusters)
+        current_level = child_clusters
+        merge_level = 0
+        while len(current_level) > 1:
+            next_level = []
+            merge_height = node_height + 0.04 * merge_level
+            for index in range(0, len(current_level), 2):
+                if index + 1 >= len(current_level):
+                    next_level.append(current_level[index])
+                    continue
+                left_id, left_count, _ = current_level[index]
+                right_id, right_count, _ = current_level[index + 1]
+                linkage_rows.append(
+                    [
+                        left_id,
+                        right_id,
+                        merge_height,
+                        left_count + right_count,
+                    ]
+                )
+                next_level.append(
+                    (
+                        leaf_count + len(linkage_rows) - 1,
+                        left_count + right_count,
+                        merge_height,
+                    )
+                )
+            current_level = next_level
+            merge_level += 1
+        return current_level[0]
+
+    convert_node(hierarchy)
+
+    return {
+        "kind": "reference",
+        "name": str(name),
+        "linkage_matrix": np.asarray(linkage_rows, dtype=np.float64),
+        "leaf_labels": leaf_labels,
+        "leaf_class_ids": leaf_class_ids,
+        "distance_description": "Synthetic binary tree depth",
+    }
+
+
+def _plot_class_hierarchy_dendrogram(
+    plot_data,
     save_path,
     epoch,
     class_groups,
-    class_names,
     metadata_text=None,
+    title=None,
 ):
-    class_ids = hierarchy["class_ids"]
-    class_counts = hierarchy["class_counts"]
-    linkage_matrix = hierarchy["linkage_matrix"]
-    linkage_method = hierarchy["linkage_method"]
-    leaf_labels = [
-        _class_hierarchy_leaf_label(class_id, class_count, class_names)
-        for class_id, class_count in zip(class_ids, class_counts)
+    leaf_labels = plot_data["leaf_labels"]
+    leaf_class_ids = plot_data["leaf_class_ids"]
+    leaf_to_class = dict(zip(leaf_labels, leaf_class_ids))
+    numeric_class_ids = [
+        int(class_id)
+        for class_id in leaf_class_ids
+        if class_id is not None
     ]
-    leaf_to_class = dict(zip(leaf_labels, class_ids))
     group_lookup = _class_group_lookup(class_groups)
-    group_colors = _class_group_colors(class_ids, group_lookup)
+    group_colors = _class_group_colors(numeric_class_ids, group_lookup)
 
-    fig_height = max(4.8, 1.5 + 0.34 * len(class_ids))
-    fig, ax = plt.subplots(figsize=(10.5, fig_height))
+    leaf_font_size = _class_hierarchy_leaf_font_size(len(leaf_labels))
+    fig_width = max(12.0, 3.0 + 0.30 * len(leaf_labels))
+    fig, ax = plt.subplots(figsize=(fig_width, 7.2))
     dendrogram(
-        linkage_matrix,
+        plot_data["linkage_matrix"],
         labels=leaf_labels,
-        orientation="right",
+        orientation="top",
         ax=ax,
-        leaf_font_size=_class_hierarchy_leaf_font_size(len(class_ids)),
+        leaf_font_size=leaf_font_size,
+        leaf_rotation=90,
         color_threshold=0,
         above_threshold_color="#333333",
     )
 
-    for tick in ax.get_yticklabels():
+    for tick in ax.get_xticklabels():
         class_id = leaf_to_class.get(tick.get_text())
-        group_name = group_lookup.get(int(class_id), "other") if class_id is not None else "other"
+        if class_id is None:
+            continue
+        group_name = group_lookup.get(int(class_id), "other")
         tick.set_color(group_colors[group_name])
 
     ax.set_title(
         _title_with_metadata(
-            f"Epoch {epoch} - {_hierarchy_display_name(linkage_method)} class prototype hierarchy",
+            title or _dendrogram_plot_title(plot_data, epoch),
             metadata_text,
-        )
+        ),
+        fontsize=14,
     )
-    ax.set_xlabel(hierarchy["distance_description"])
-    ax.grid(True, axis="x", color="#d9d9d9", linewidth=0.5, alpha=0.6)
+    ax.set_ylabel(plot_data["distance_description"], fontsize=12)
+    ax.tick_params(axis="y", labelsize=10)
+    ax.grid(True, axis="y", color="#d9d9d9", linewidth=0.5, alpha=0.6)
 
     if group_colors:
         handles = [
             Line2D([0], [0], color=color, lw=3, label=group_name)
             for group_name, color in group_colors.items()
         ]
-        ax.legend(handles=handles, title="Class group", loc="lower right", frameon=False)
+        ax.legend(
+            handles=handles,
+            title="Class group",
+            loc="center left",
+            bbox_to_anchor=(1.01, 0.5),
+            borderaxespad=0.0,
+            frameon=False,
+            fontsize=10,
+            title_fontsize=11,
+        )
 
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.0, 0.0, 0.84, 1.0) if group_colors else None)
     fig.savefig(save_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
+
+
+def _dendrogram_plot_title(plot_data, epoch):
+    prefix = f"Epoch {epoch} - " if epoch is not None else ""
+    if plot_data["kind"] == "learned":
+        return (
+            f"{prefix}{_hierarchy_display_name(plot_data['linkage_method'])} "
+            "class prototype hierarchy"
+        )
+    return f"{prefix}{plot_data['name']} reference class hierarchy"
 
 
 def _class_hierarchy_leaf_label(class_id, class_count, class_names):
     return f"{_class_display_name(int(class_id), class_names)} (n={int(class_count)})"
 
 
+def _reference_hierarchy_leaf_label(node, class_names):
+    class_id = node.get("class_id")
+    if class_id is None:
+        return str(node.get("name", ""))
+    return _class_display_name(int(class_id), class_names)
+
+
+def _reference_hierarchy_leaves(node):
+    children = list(node.get("children", []))
+    if not children:
+        return [node]
+    leaves = []
+    for child in children:
+        leaves.extend(_reference_hierarchy_leaves(child))
+    return leaves
+
+
+def _safe_plot_token(value):
+    token = "".join(
+        char if char.isalnum() or char in ("-", "_") else "_"
+        for char in str(value)
+    ).strip("_")
+    return token or "hierarchy"
+
+
 def _class_hierarchy_leaf_font_size(num_classes):
     if num_classes > 40:
-        return 5
+        return 7
     if num_classes > 20:
-        return 6
-    return 8
+        return 8
+    return 9
 
 
 def _class_group_lookup(class_groups):

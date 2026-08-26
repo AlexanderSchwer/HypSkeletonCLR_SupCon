@@ -21,6 +21,7 @@ from tools.hyperbolic_embedding_plot import (
     format_class_hierarchies,
     render_embedding_diagnostics,
 )
+from tools.action_label_hierarchy import hierarchy_leaf_ids
 
 
 class SkeletonCLR_Plotting(PT_Processor):
@@ -72,6 +73,7 @@ class SkeletonCLR_Plotting(PT_Processor):
             color_by=self.arg.plot_color_by,
             class_groups=self.arg.plot_class_groups,
             class_names=self.arg.plot_class_names,
+            class_hierarchy=self.arg.plot_reference_hierarchy,
             dataset_size=dataset_size,
             split_name="train",
             render_class_hierarchy=self.arg.plot_hierarchy,
@@ -95,6 +97,7 @@ class SkeletonCLR_Plotting(PT_Processor):
                     selected_labels=self._plot_selected_labels(),
                     class_groups=self.arg.plot_class_groups,
                     class_names=self.arg.plot_class_names,
+                    class_hierarchy=self.arg.plot_reference_hierarchy,
                     linkage_methods=self.arg.plot_hierarchy_linkages,
                     max_merges=self.arg.plot_hierarchy_log_max_merges,
                 )
@@ -108,8 +111,17 @@ class SkeletonCLR_Plotting(PT_Processor):
 
     def _plot_selected_labels(self):
         if not self.arg.plot_selected_labels:
+            labels = self._reference_hierarchy_leaf_ids(self.arg.plot_reference_hierarchy)
+            if labels:
+                return labels
             return list(DEFAULT_STANDALONE_PLOT_CLASSES)
         return self.arg.plot_selected_labels
+
+    @staticmethod
+    def _reference_hierarchy_leaf_ids(reference_hierarchy):
+        if not reference_hierarchy:
+            return []
+        return hierarchy_leaf_ids(reference_hierarchy)
 
     @staticmethod
     def _loader_dataset_size(loader):
@@ -144,6 +156,7 @@ class SkeletonCLR_Plotting(PT_Processor):
         parser.add_argument('--plot_color_by', default=['class'], nargs='+', choices=['class', 'class_group'], help='color plots by one or more modes: class or class_group')
         parser.add_argument('--plot_class_groups', action=DictAction, default=dict(), help='mapping from group names to class-label lists')
         parser.add_argument('--plot_class_names', action=DictAction, default=dict(), help='mapping from class labels to semantic class names')
+        parser.add_argument('--plot_reference_hierarchy', default='', help='stored hierarchy name used to fill plot_class_groups and plot_class_names when omitted, e.g. hypskeletonclr_ward')
         parser.add_argument('--plot_hierarchy', type=str2bool, default=True, help='render class-prototype hierarchy diagnostics')
         parser.add_argument('--plot_hierarchy_linkages', default=['ward_tangent'], nargs='+', help='class hierarchy linkages to render: ward_tangent, single_hyperbolic, complete_hyperbolic, average_hyperbolic, weighted_hyperbolic, or all')
         parser.add_argument('--plot_hierarchy_log_max_merges', type=int, default=20, help='maximum hierarchy merge rows printed by standalone plotting; 0 prints all')

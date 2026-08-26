@@ -36,6 +36,7 @@ from tools.hyperbolic_embedding_plot import (
     format_class_hierarchies,
     render_embedding_diagnostics,
 )
+from tools.action_label_hierarchy import hierarchy_leaf_ids
 
 import wandb
 
@@ -335,6 +336,7 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--embedding_plot_color_by', default=['class_group'], nargs='+', choices=['class', 'class_group'], help='color embedding diagnostics by one or more modes: class or class_group')
         parser.add_argument('--embedding_plot_class_groups', action=DictAction, default=dict(), help='mapping from group names to class-label lists')
         parser.add_argument('--embedding_plot_class_names', action=DictAction, default=dict(), help='mapping from class labels to semantic class names')
+        parser.add_argument('--embedding_plot_reference_hierarchy', default='', help='stored hierarchy name used to fill embedding_plot_class_groups and embedding_plot_class_names when omitted, e.g. hypskeletonclr_ward')
         parser.add_argument('--embedding_plot_hierarchy', type=str2bool, default=True, help='render class-prototype hierarchy diagnostics with embedding plots')
         parser.add_argument('--embedding_plot_hierarchy_linkages', default=['ward_tangent'], nargs='+', help='class hierarchy linkages to render: ward_tangent, single_hyperbolic, complete_hyperbolic, average_hyperbolic, weighted_hyperbolic, or all')
         parser.add_argument('--embedding_plot_hierarchy_log_max_merges', type=int, default=20, help='maximum hierarchy merge rows written to the training log; 0 logs all')
@@ -721,8 +723,17 @@ class SkeletonCLR_Processor(PT_Processor):
 
     def _embedding_plot_selected_labels(self):
         if not self.arg.embedding_plot_selected_labels:
+            labels = self._reference_hierarchy_leaf_ids(self.arg.embedding_plot_reference_hierarchy)
+            if labels:
+                return labels
             return default_hierarchy_plot_classes()
         return self.arg.embedding_plot_selected_labels
+
+    @staticmethod
+    def _reference_hierarchy_leaf_ids(reference_hierarchy):
+        if not reference_hierarchy:
+            return []
+        return hierarchy_leaf_ids(reference_hierarchy)
 
     def _render_embedding_snapshot(self, epoch, snapshot):
         if not snapshot["embeddings"]:
@@ -758,6 +769,7 @@ class SkeletonCLR_Processor(PT_Processor):
                 color_by=self.arg.embedding_plot_color_by,
                 class_groups=self.arg.embedding_plot_class_groups,
                 class_names=self.arg.embedding_plot_class_names,
+                class_hierarchy=self.arg.embedding_plot_reference_hierarchy,
                 dataset_size=snapshot.get("dataset_size"),
                 split_name=snapshot.get("split_name"),
                 render_class_hierarchy=self.arg.embedding_plot_hierarchy,
@@ -786,6 +798,7 @@ class SkeletonCLR_Processor(PT_Processor):
                 selected_labels=self._embedding_plot_selected_labels(),
                 class_groups=self.arg.embedding_plot_class_groups,
                 class_names=self.arg.embedding_plot_class_names,
+                class_hierarchy=self.arg.embedding_plot_reference_hierarchy,
                 linkage_methods=self.arg.embedding_plot_hierarchy_linkages,
                 max_merges=self.arg.embedding_plot_hierarchy_log_max_merges,
             )

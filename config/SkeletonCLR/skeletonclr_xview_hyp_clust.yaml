@@ -88,16 +88,16 @@ embedding_plot_class_groups:
   falling_posture: [42]
   interpersonal: [50, 54]
 embedding_plot_class_names:
-  5: "pickup"
+  5: "pick up"
   11: "writing"
-  13: "wear jacket"
+  13: "put on jacket"
   14: "take off jacket"
   25: "hopping"
   27: "phone call"
-  39: "cross hands"
-  42: "falling"
-  50: "kicking other person"
-  54: "hugging other person"
+  39: "cross hands in front"
+  42: "falling down"
+  50: "kicking"
+  54: "hugging"
 
 # log
 save_interval: 5

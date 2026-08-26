@@ -7,6 +7,7 @@ import numpy as np
 from tools.hyperbolic_embedding_plot import (
     compute_class_hierarchy,
     format_class_hierarchies,
+    plot_class_hierarchy,
     render_embedding_diagnostics,
 )
 
@@ -97,6 +98,30 @@ class EmbeddingHierarchyDiagnosticsTest(unittest.TestCase):
 
         self.assertIn("Ward Tangent class hierarchy diagnostics", table)
         self.assertIn("Average Hyperbolic class hierarchy diagnostics", table)
+
+    def test_format_class_hierarchy_resolves_stored_reference_hierarchy(self):
+        embeddings, labels = self._sample_embeddings()
+
+        table = format_class_hierarchies(
+            embeddings,
+            labels,
+            curvature=1.0,
+            selected_labels=[0, 1, 2, 3],
+            class_hierarchy="hypskeletonclr_ward",
+            linkage_methods=["ward_tangent"],
+            max_merges=1,
+        )
+
+        self.assertIn("personal_and_mundane_tasks", table)
+        self.assertIn("0: drink water", table)
+
+    def test_plot_class_hierarchy_renders_stored_reference_tree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "reference_hierarchy.png")
+
+            plot_class_hierarchy("hypskeletonclr_ward", save_path=path)
+
+            self.assertTrue(os.path.exists(path))
 
     def test_render_embedding_diagnostics_creates_hierarchy_images(self):
         embeddings, labels = self._sample_embeddings()
