@@ -55,6 +55,11 @@ class SupConLoss(nn.Module):
                 raise ValueError('Num of labels does not match num of features')
             mask = torch.eq(labels, labels.T).float().to(device)
         else:
+            if mask.shape != (batch_size, batch_size):
+                raise ValueError(
+                    f'`mask` must have shape [{batch_size}, {batch_size}], '
+                    f'got {tuple(mask.shape)}'
+                )
             mask = mask.float().to(device)
 
         contrast_count = features.shape[1]
@@ -89,7 +94,7 @@ class SupConLoss(nn.Module):
         #    self.temperature)
 
         # for numerical stability
-        logits_max, _ = torch.max(anchor_dot_contrast, dim=0, keepdim=True)
+        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits = anchor_dot_contrast - logits_max.detach()
 
         # tile mask
@@ -105,7 +110,7 @@ class SupConLoss(nn.Module):
 
         # compute log_prob
         exp_logits = torch.exp(logits) * logits_mask
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True).clamp_min(1e-12))
 
         # compute mean of log-likelihood over positive
         # modified to handle edge cases when there is no positive pair
@@ -115,11 +120,21 @@ class SupConLoss(nn.Module):
         # labels:            [0,1,1,2]
         # loss before mean:  [nan, ..., ..., nan] 
         mask_pos_pairs = mask.sum(1)
-        mask_pos_pairs = torch.where(mask_pos_pairs < 1e-6, 1, mask_pos_pairs)
-        mean_log_prob_pos = (mask * log_prob).sum(1) / mask_pos_pairs
+        valid_anchor = mask_pos_pairs >= 1e-6
+        safe_mask_pos_pairs = torch.where(
+            valid_anchor,
+            mask_pos_pairs,
+            torch.ones_like(mask_pos_pairs),
+        )
+        mean_log_prob_pos = (mask * log_prob).sum(1) / safe_mask_pos_pairs
 
         # loss
         loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
-        loss = loss.view(anchor_count, batch_size).mean()
+        loss = loss.view(anchor_count, batch_size)
+        valid_anchor = valid_anchor.view(anchor_count, batch_size)
+        if valid_anchor.any():
+            loss = loss[valid_anchor].mean()
+        else:
+            loss = logits.sum() * 0.0
 
         return loss

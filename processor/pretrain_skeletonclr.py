@@ -30,6 +30,7 @@ from tools.hyperbolic_hierarchy import (
     sample_triplets_from_affinity,
     hierarchy_triplet_loss_hyp,
 )
+from tools.pseudo_labeling import pseudo_label_mask_from_posteriors
 from tools.hyperbolic_embedding_plot import (
     DEFAULT_NEGATIVE_DISTANCE_SAMPLES,
     default_hierarchy_plot_classes,
@@ -164,34 +165,19 @@ class SkeletonCLR_Processor(PT_Processor):
                 output,
             )
 
-            if epoch < self.arg.sup_epoch:
-                if hasattr(self.model, 'module'):
-                    self.model.module.update_ptr(output.size(0))
-                else:
-                    self.model.update_ptr(output.size(0))
-                loss = self.loss(output, target)
+            if hasattr(self.model, 'module'):
+                self.model.module.update_ptr(output.size(0))
             else:
-                if hasattr(self.model, 'module'):
-                    self.model.module.update_ptr(output.size(0))
-                else:
-                    self.model.update_ptr(output.size(0))
-                
-                #loss_unsup = self.loss(output, target)
-                
-                try:
-                    label_sup = torch.tensor([label_mapping[int(l)] for l in label], device=label.device)
-                except NameError:
-                    label_sup = label
+                self.model.update_ptr(output.size(0))
 
-                loss_sup = self.criterion(features_sup, label_sup)
-                
-                # new loss function: scaled sum of unsupervised and supervised loss
-                #alpha = (epoch - self.arg.sup_epoch) / (self.arg.num_epoch - self.arg.sup_epoch)
-                alpha = 1.0
-                #loss = (1 - alpha) * loss_unsup + alpha * loss_sup
-                loss = loss_sup
-
-            loss_base = loss
+            loss_base, contrastive_metrics = self._compute_contrastive_mode_loss(
+                features_sup=features_sup,
+                cluster_pack=cluster_pack,
+                output=output,
+                target=target,
+                labels=label,
+            )
+            loss = loss_base
             loss_sink, loss_hier, cluster_metrics = self._compute_cluster_losses(cluster_pack)
             self._accumulate_cluster_distance_diagnostics(
                 cluster_distance_diagnostics,
@@ -220,6 +206,7 @@ class SkeletonCLR_Processor(PT_Processor):
             # statistics
             self.iter_info['loss'] = loss.data.item()
             self.iter_info['loss_base'] = loss_base.data.item()
+            self.iter_info.update(contrastive_metrics)
             self.iter_info['lambda_sink_effective'] = sink_weight
             self.iter_info['lambda_hier_effective'] = hier_weight
             self.iter_info.update(cluster_metrics)
@@ -245,13 +232,13 @@ class SkeletonCLR_Processor(PT_Processor):
                 payload = {
                     "loss": loss.data.item(),
                     "loss_base": loss_base.data.item(),
+                    "contrastive_mode": self.arg.contrastive_mode,
                     "lambda_sink_effective": sink_weight,
                     "lambda_hier_effective": hier_weight,
-                    #"supervised_loss": loss_sup.data.item(),
-                    #"unsupervised_loss": loss_unsup.data.item(),
                     "learning_rate": self.lr,
                     "epoch": epoch}
                 payload.update(cluster_metrics)
+                payload.update(contrastive_metrics)
                 if loss_sink is not None:
                     payload["loss_sink"] = loss_sink.data.item()
                 if loss_hier is not None:
@@ -269,11 +256,7 @@ class SkeletonCLR_Processor(PT_Processor):
             self.train_writer.add_scalar('loss_hier', self.epoch_info['train_mean_loss_hier'], epoch)
         self.train_writer.add_scalar('loss', self.epoch_info['train_mean_loss'], epoch)
 
-        if epoch < self.arg.sup_epoch:
-            alpha = 0
-            print(f"Scaling of Loss Functions -> Unsupervised: {1 - alpha:.4f}, Supervised: {alpha:.4f}")
-        else:
-            print(f"Scaling of Loss Functions -> Unsupervised: {1 - alpha:.4f}, Supervised: {alpha:.4f}")
+        print(f"Contrastive mode: {self.arg.contrastive_mode}")
         
         # Log epoch-level mean loss
         epoch_payload = {
@@ -311,9 +294,10 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--nesterov', type=str2bool, default=True, help='use nesterov or not')
         parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight decay for optimizer')
         parser.add_argument('--view', type=str, default='joint', help='the view of input')
-        parser.add_argument('--sup_epoch', type=int, default=1e6, help='the starting epoch of supervised training')
+        parser.add_argument('--sup_epoch', type=int, default=1e6, help='legacy option; use contrastive_mode=supervised for true-label SupCon')
         parser.add_argument('--temperature', type=float, default=0.07, help='the temperature used in supervised training loss')
         parser.add_argument('--curvature', type=float, default=1.0, help='the curvature of the Poincaré ball')
+        parser.add_argument('--contrastive_mode', default='augmentation', choices=['augmentation', 'supervised', 'pseudo_hard', 'pseudo_soft'], help='primary contrastive objective: augmentation-only, true-label SupCon, hard pseudo-label SupCon, or soft pseudo-label SupCon')
         parser.add_argument('--lambda_sink', type=float, default=1.0, help='maximum weight for Sinkhorn clustering loss')
         parser.add_argument('--cluster_warmup_steps', type=int, default=1000, help='MoCo-only iterations before Sinkhorn loss')
         parser.add_argument('--cluster_ramp_steps', type=int, default=2000, help='iterations used to ramp Sinkhorn loss weight')
@@ -327,6 +311,13 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--hier_margin', type=float, default=0.05, help='triplet margin for hierarchy loss')
         parser.add_argument('--affinity_momentum', type=float, default=0.9, help='EMA momentum for cluster affinity')
         parser.add_argument('--affinity_temperature', type=float, default=1.0, help='temperature for prototype affinity')
+        parser.add_argument('--lambda_aug', type=float, default=1.0, help='positive weight for augmentation pairs in SupCon modes')
+        parser.add_argument('--lambda_pseudo', type=float, default=None, help='maximum positive weight for pseudo-label pairs in pseudo SupCon modes')
+        parser.add_argument('--lambda_pseudo_supcon', type=float, default=None, help='deprecated alias for lambda_pseudo')
+        parser.add_argument('--pseudo_supcon_warmup_steps', type=int, default=0, help='iterations before pseudo-label positive weights are enabled')
+        parser.add_argument('--pseudo_supcon_ramp_steps', type=int, default=0, help='iterations used to ramp pseudo-label positive weights')
+        parser.add_argument('--pseudo_supcon_confidence_threshold', type=float, default=0.8, help='minimum prototype posterior confidence for pseudo-label positives')
+        parser.add_argument('--pseudo_supcon_assignment_source', default='q_k', choices=['p_q', 'p_k', 'q_k', 'p_mean'], help='cluster posterior used to form pseudo labels')
         parser.add_argument('--wandb_offline', type=str2bool, default=False, help='log W&B offline and automatically sync the run when the script exits')
         parser.add_argument('--wandb_disabled', type=str2bool, default=False, help='disable W&B init, logging, finishing, and sync completely')
         parser.add_argument('--embedding_plot_interval', type=int, default=0, help='render embedding diagnostic plots every N epochs; 0 disables live plotting')
@@ -419,6 +410,118 @@ class SkeletonCLR_Processor(PT_Processor):
             hierarchy_triplet_accuracy,
         )
         return loss_sink, loss_hier, metrics
+
+    def _compute_contrastive_mode_loss(
+        self,
+        features_sup,
+        cluster_pack=None,
+        output=None,
+        target=None,
+        labels=None,
+        stream_outputs=None,
+    ):
+        mode = self.arg.contrastive_mode
+        metrics = {
+            "contrastive_mode": mode,
+            "lambda_aug_effective": float(self.arg.lambda_aug),
+            "lambda_pseudo_effective": 0.0,
+        }
+
+        if mode == "augmentation":
+            if stream_outputs is None:
+                if output is None or target is None:
+                    raise ValueError("augmentation mode requires output and target")
+                return self.loss(output, target), metrics
+
+            losses = [self.loss(stream_output, target) for stream_output in stream_outputs]
+            return sum(losses), metrics
+
+        if features_sup is None:
+            raise ValueError(f"{mode} mode requires SupCon features from the model")
+
+        if mode == "supervised":
+            if labels is None:
+                raise ValueError("supervised mode requires dataset labels")
+            return self.criterion(features_sup, labels), metrics
+
+        if cluster_pack is None:
+            raise ValueError(f"{mode} mode requires cluster_enabled=True and cluster outputs")
+        if not isinstance(cluster_pack, dict):
+            raise ValueError("cluster_pack must be a dict when provided")
+
+        posteriors = self._pseudo_supcon_posteriors(cluster_pack)
+        if posteriors is None:
+            raise ValueError(
+                f"{mode} mode requires posterior source "
+                f"{self.arg.pseudo_supcon_assignment_source!r}"
+            )
+        if posteriors.size(0) != features_sup.size(0):
+            raise ValueError(
+                "pseudo SupCon posteriors and features must have matching batch "
+                f"sizes, got {posteriors.size(0)} and {features_sup.size(0)}"
+            )
+
+        pseudo_weight = self._ramp_weight(
+            self._max_lambda_pseudo(),
+            self.arg.pseudo_supcon_warmup_steps,
+            self.arg.pseudo_supcon_ramp_steps,
+        )
+        mask, pseudo_labels, confidence, confident = pseudo_label_mask_from_posteriors(
+            posteriors,
+            confidence_threshold=self.arg.pseudo_supcon_confidence_threshold,
+            mode=mode,
+            lambda_aug=self.arg.lambda_aug,
+            lambda_pseudo=pseudo_weight,
+        )
+        metrics.update(
+            self._pseudo_supcon_metrics(mask, pseudo_labels, confidence, confident)
+        )
+        metrics["lambda_pseudo_effective"] = pseudo_weight
+
+        return self.criterion(features_sup, mask=mask), metrics
+
+    def _pseudo_supcon_posteriors(self, cluster_pack):
+        source = self.arg.pseudo_supcon_assignment_source
+        if source == 'p_mean':
+            p_q = cluster_pack.get('p_q', None)
+            p_k = cluster_pack.get('p_k', None)
+            if p_q is None or p_k is None:
+                return None
+            return 0.5 * (p_q.detach() + p_k.detach())
+
+        posteriors = cluster_pack.get(source, None)
+        if posteriors is None:
+            return None
+        return posteriors.detach()
+
+    def _max_lambda_pseudo(self):
+        if self.arg.lambda_pseudo is not None:
+            return self.arg.lambda_pseudo
+        if self.arg.lambda_pseudo_supcon is not None:
+            return self.arg.lambda_pseudo_supcon
+        return 1.0
+
+    @staticmethod
+    def _pseudo_supcon_metrics(mask, pseudo_labels, confidence, confident):
+        with torch.no_grad():
+            batch_size = mask.size(0)
+            identity = torch.eye(batch_size, dtype=torch.bool, device=mask.device)
+            extra_positive_pairs = ((mask > 0) & ~identity).sum()
+            possible_extra_pairs = max(1, batch_size * (batch_size - 1))
+            active_clusters = (
+                int(pseudo_labels[confident].unique().numel())
+                if confident.any()
+                else 0
+            )
+            return {
+                "pseudo_supcon_confident_ratio": confident.float().mean().item(),
+                "pseudo_supcon_confidence_mean": confidence.mean().item(),
+                "pseudo_supcon_active_clusters": active_clusters,
+                "pseudo_supcon_extra_positive_pairs": int(extra_positive_pairs.item()),
+                "pseudo_supcon_extra_positive_density": (
+                    extra_positive_pairs.float() / float(possible_extra_pairs)
+                ).item(),
+            }
 
     def _ramp_weight(self, maximum, warmup_steps, ramp_steps):
         if self.global_step < warmup_steps:
