@@ -83,25 +83,15 @@ class SkeletonCLR_3views_Processor(SkeletonCLR_Processor):
                 self.model.module.update_ptr(output.size(0))
             else:
                 self.model.update_ptr(output.size(0))
-            loss_joint = None
-            loss_motion = None
-            loss_bone = None
-            if self.arg.contrastive_mode == "augmentation":
-                loss_joint = self.loss(output, target)
-                loss_motion = self.loss(output_motion, target)
-                loss_bone = self.loss(output_bone, target)
-                loss_base = loss_joint + loss_motion + loss_bone
-                contrastive_metrics = {
-                    "contrastive_mode": self.arg.contrastive_mode,
-                    "lambda_aug_effective": float(self.arg.lambda_aug),
-                    "lambda_pseudo_effective": 0.0,
-                }
-            else:
-                loss_base, contrastive_metrics = self._compute_contrastive_mode_loss(
-                    features_sup=features_sup,
-                    cluster_pack=cluster_pack,
-                    labels=label,
-                )
+            loss_base, contrastive_metrics = self._compute_scheduled_contrastive_loss(
+                epoch=epoch,
+                features_sup=features_sup,
+                cluster_pack=cluster_pack,
+                output=output,
+                target=target,
+                labels=label,
+                stream_outputs=(output, output_motion, output_bone),
+            )
             loss = loss_base
             loss_sink, loss_hier, cluster_metrics = self._compute_cluster_losses(cluster_pack)
             self._accumulate_cluster_distance_diagnostics(
@@ -132,10 +122,10 @@ class SkeletonCLR_3views_Processor(SkeletonCLR_Processor):
             self.iter_info['loss'] = loss.data.item()
             self.iter_info['loss_base'] = loss_base.data.item()
             self.iter_info.update(contrastive_metrics)
-            if loss_joint is not None:
-                self.iter_info['loss_joint'] = loss_joint.data.item()
-                self.iter_info['loss_motion'] = loss_motion.data.item()
-                self.iter_info['loss_bone'] = loss_bone.data.item()
+            if 'loss_joint' in contrastive_metrics:
+                self.iter_info['loss_joint'] = contrastive_metrics['loss_joint']
+                self.iter_info['loss_motion'] = contrastive_metrics['loss_motion']
+                self.iter_info['loss_bone'] = contrastive_metrics['loss_bone']
             else:
                 for key in ('loss_joint', 'loss_motion', 'loss_bone'):
                     if key in self.iter_info:
@@ -157,13 +147,13 @@ class SkeletonCLR_3views_Processor(SkeletonCLR_Processor):
 
             self.iter_info['lr'] = '{:.6f}'.format(self.lr)
             loss_value.append(self.iter_info['loss'])
-            if loss_joint is not None:
+            if 'loss_joint' in contrastive_metrics:
                 loss_joint_value.append(self.iter_info['loss_joint'])
                 loss_motion_value.append(self.iter_info['loss_motion'])
                 loss_bone_value.append(self.iter_info['loss_bone'])
             self.show_iter_info()
             self.meta_info['iter'] += 1
-            if loss_joint is not None:
+            if 'loss_joint' in contrastive_metrics:
                 self.train_writer.add_scalar('batch_loss_joint', self.iter_info['loss_joint'], self.global_step)
                 self.train_writer.add_scalar('batch_loss_motion', self.iter_info['loss_motion'], self.global_step)
                 self.train_writer.add_scalar('batch_loss_bone', self.iter_info['loss_bone'], self.global_step)
@@ -173,19 +163,13 @@ class SkeletonCLR_3views_Processor(SkeletonCLR_Processor):
                 payload = {
                     "loss": loss.data.item(),
                     "loss_base": loss_base.data.item(),
-                    "contrastive_mode": self.arg.contrastive_mode,
+                    "contrastive_mode": contrastive_metrics["contrastive_mode"],
                     "lambda_sink_effective": sink_weight,
                     "lambda_hier_effective": hier_weight,
                     "learning_rate": self.lr,
                     "epoch": epoch}
                 payload.update(cluster_metrics)
                 payload.update(contrastive_metrics)
-                if loss_joint is not None:
-                    payload.update({
-                        "loss_joint": loss_joint.data.item(),
-                        "loss_motion": loss_motion.data.item(),
-                        "loss_bone": loss_bone.data.item(),
-                    })
                 if loss_sink is not None:
                     payload["loss_sink"] = loss_sink.data.item()
                 if loss_hier is not None:
@@ -214,7 +198,7 @@ class SkeletonCLR_3views_Processor(SkeletonCLR_Processor):
         # Log epoch-level mean loss
         epoch_payload = {
             "train_mean_loss": np.mean(loss_value),
-            "contrastive_mode": self.arg.contrastive_mode,
+            "contrastive_mode": self._format_active_contrastive_modes(epoch),
             "learning_rate": self.lr,
             "epoch": epoch}
         if loss_joint_value:

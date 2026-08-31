@@ -23,6 +23,14 @@ class RecordingCriterion:
         return features.sum() * 0.0 + 2.0
 
 
+class ConstantLoss:
+    def __init__(self, value):
+        self.value = float(value)
+
+    def __call__(self, output, target):
+        return output.sum() * 0.0 + self.value
+
+
 class PrototypePseudoLabelingTest(unittest.TestCase):
     def test_confident_same_cluster_samples_become_extra_positives(self):
         posteriors = torch.tensor(
@@ -134,9 +142,19 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
 
         processor = object.__new__(SkeletonCLR_Processor)
         processor.arg = SimpleNamespace(
-            contrastive_mode="pseudo_hard",
+            contrastive_mode=None,
+            contrastive_schedule=[
+                {
+                    "mode": "pseudo_hard",
+                    "start_epoch": 1,
+                    "end_epoch": 1,
+                    "lambda_aug": 1.0,
+                    "lambda_pseudo": 1.0,
+                }
+            ],
+            num_epoch=1,
             lambda_aug=1.0,
-            lambda_pseudo=1.0,
+            lambda_pseudo=None,
             lambda_pseudo_supcon=None,
             pseudo_supcon_warmup_steps=0,
             pseudo_supcon_ramp_steps=0,
@@ -145,6 +163,7 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
         )
         processor.criterion = RecordingCriterion()
         processor.global_step = 1
+        processor.contrastive_schedule = processor._normalize_contrastive_schedule()
 
         features = torch.randn(3, 2, 4)
         cluster_pack = {
@@ -152,7 +171,8 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
             "p_k": torch.tensor([[0.90, 0.10], [0.90, 0.10], [0.10, 0.90]]),
         }
 
-        loss, metrics = processor._compute_contrastive_mode_loss(
+        loss, metrics = processor._compute_scheduled_contrastive_loss(
+            epoch=1,
             features_sup=features,
             cluster_pack=cluster_pack,
         )
@@ -180,15 +200,21 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
 
         processor = object.__new__(SkeletonCLR_Processor)
         processor.arg = SimpleNamespace(
-            contrastive_mode="supervised",
+            contrastive_mode=None,
+            contrastive_schedule=[
+                {"mode": "supervised", "start_epoch": 1, "end_epoch": 1}
+            ],
+            num_epoch=1,
             lambda_aug=1.0,
         )
         processor.criterion = RecordingCriterion()
+        processor.contrastive_schedule = processor._normalize_contrastive_schedule()
 
         features = torch.randn(3, 2, 4)
         labels = torch.tensor([0, 1, 1])
 
-        loss, metrics = processor._compute_contrastive_mode_loss(
+        loss, metrics = processor._compute_scheduled_contrastive_loss(
+            epoch=1,
             features_sup=features,
             labels=labels,
         )
@@ -200,6 +226,76 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
         self.assertEqual(metrics["contrastive_mode"], "supervised")
         self.assertEqual(metrics["lambda_pseudo_effective"], 0.0)
 
+    def test_schedule_blends_adjacent_modes_during_transition(self):
+        if not HAS_GEOOPT:
+            self.skipTest("geoopt is required to import the pretraining processor")
+        try:
+            from processor.pretrain_skeletonclr import SkeletonCLR_Processor
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"processor dependency is not installed: {exc}")
+
+        processor = object.__new__(SkeletonCLR_Processor)
+        processor.arg = SimpleNamespace(
+            contrastive_mode=None,
+            contrastive_schedule=[
+                {"mode": "augmentation", "start_epoch": 1, "end_epoch": 2},
+                {
+                    "mode": "supervised",
+                    "start_epoch": 3,
+                    "end_epoch": 5,
+                    "transition_epochs": 2,
+                },
+            ],
+            num_epoch=5,
+            lambda_aug=1.0,
+        )
+        processor.loss = ConstantLoss(10.0)
+        processor.criterion = RecordingCriterion()
+        processor.contrastive_schedule = processor._normalize_contrastive_schedule()
+
+        output = torch.randn(2, 3)
+        target = torch.zeros(2, dtype=torch.long)
+        features = torch.randn(2, 2, 4)
+        labels = torch.tensor([0, 1])
+
+        loss, metrics = processor._compute_scheduled_contrastive_loss(
+            epoch=3,
+            features_sup=features,
+            output=output,
+            target=target,
+            labels=labels,
+        )
+
+        self.assertAlmostEqual(
+            loss.item(),
+            (2.0 / 3.0) * 10.0 + (1.0 / 3.0) * 2.0,
+            places=6,
+        )
+        self.assertEqual(metrics["contrastive_mode"], "augmentation:0.667+supervised:0.333")
+        self.assertAlmostEqual(metrics["contrastive_phase_0_weight"], 2.0 / 3.0)
+        self.assertAlmostEqual(metrics["contrastive_phase_1_weight"], 1.0 / 3.0)
+
+    def test_schedule_rejects_missing_epoch_coverage(self):
+        if not HAS_GEOOPT:
+            self.skipTest("geoopt is required to import the pretraining processor")
+        try:
+            from processor.pretrain_skeletonclr import SkeletonCLR_Processor
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"processor dependency is not installed: {exc}")
+
+        processor = object.__new__(SkeletonCLR_Processor)
+        processor.arg = SimpleNamespace(
+            contrastive_mode=None,
+            contrastive_schedule=[
+                {"mode": "augmentation", "start_epoch": 1, "end_epoch": 1},
+                {"mode": "supervised", "start_epoch": 3, "end_epoch": 5},
+            ],
+            num_epoch=5,
+        )
+
+        with self.assertRaises(ValueError):
+            processor._normalize_contrastive_schedule()
+
     def test_processor_rejects_misaligned_pseudo_supcon_batches(self):
         if not HAS_GEOOPT:
             self.skipTest("geoopt is required to import the pretraining processor")
@@ -210,9 +306,19 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
 
         processor = object.__new__(SkeletonCLR_Processor)
         processor.arg = SimpleNamespace(
-            contrastive_mode="pseudo_hard",
+            contrastive_mode=None,
+            contrastive_schedule=[
+                {
+                    "mode": "pseudo_hard",
+                    "start_epoch": 1,
+                    "end_epoch": 1,
+                    "lambda_aug": 1.0,
+                    "lambda_pseudo": 1.0,
+                }
+            ],
+            num_epoch=1,
             lambda_aug=1.0,
-            lambda_pseudo=1.0,
+            lambda_pseudo=None,
             lambda_pseudo_supcon=None,
             pseudo_supcon_warmup_steps=0,
             pseudo_supcon_ramp_steps=0,
@@ -221,12 +327,14 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
         )
         processor.criterion = RecordingCriterion()
         processor.global_step = 1
+        processor.contrastive_schedule = processor._normalize_contrastive_schedule()
 
         features = torch.randn(3, 2, 4)
         cluster_pack = {"q_k": torch.tensor([[0.90, 0.10], [0.80, 0.20]])}
 
         with self.assertRaises(ValueError):
-            processor._compute_contrastive_mode_loss(
+            processor._compute_scheduled_contrastive_loss(
+                epoch=1,
                 features_sup=features,
                 cluster_pack=cluster_pack,
             )

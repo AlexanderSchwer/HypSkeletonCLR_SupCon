@@ -44,6 +44,9 @@ import wandb
 import geoopt as gt
 import geoopt.manifolds.stereographic.math as pmath 
 
+CONTRASTIVE_MODES = ('augmentation', 'supervised', 'pseudo_hard', 'pseudo_soft')
+
+
 class SkeletonCLR_Processor(PT_Processor):
     """
         Processor for SkeletonCLR Pretraining.
@@ -51,6 +54,8 @@ class SkeletonCLR_Processor(PT_Processor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cluster_affinity = None
+        self.contrastive_schedule = self._normalize_contrastive_schedule()
+        self.arg.contrastive_schedule = self.contrastive_schedule
         
         # Initialize wandb run
         self._wandb_ok = not self.arg.wandb_disabled
@@ -170,7 +175,8 @@ class SkeletonCLR_Processor(PT_Processor):
             else:
                 self.model.update_ptr(output.size(0))
 
-            loss_base, contrastive_metrics = self._compute_contrastive_mode_loss(
+            loss_base, contrastive_metrics = self._compute_scheduled_contrastive_loss(
+                epoch=epoch,
                 features_sup=features_sup,
                 cluster_pack=cluster_pack,
                 output=output,
@@ -232,7 +238,7 @@ class SkeletonCLR_Processor(PT_Processor):
                 payload = {
                     "loss": loss.data.item(),
                     "loss_base": loss_base.data.item(),
-                    "contrastive_mode": self.arg.contrastive_mode,
+                    "contrastive_mode": contrastive_metrics["contrastive_mode"],
                     "lambda_sink_effective": sink_weight,
                     "lambda_hier_effective": hier_weight,
                     "learning_rate": self.lr,
@@ -256,7 +262,7 @@ class SkeletonCLR_Processor(PT_Processor):
             self.train_writer.add_scalar('loss_hier', self.epoch_info['train_mean_loss_hier'], epoch)
         self.train_writer.add_scalar('loss', self.epoch_info['train_mean_loss'], epoch)
 
-        print(f"Contrastive mode: {self.arg.contrastive_mode}")
+        print(f"Contrastive mode: {self._format_active_contrastive_modes(epoch)}")
         
         # Log epoch-level mean loss
         epoch_payload = {
@@ -294,10 +300,10 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--nesterov', type=str2bool, default=True, help='use nesterov or not')
         parser.add_argument('--weight_decay', type=float, default=0.0001, help='weight decay for optimizer')
         parser.add_argument('--view', type=str, default='joint', help='the view of input')
-        parser.add_argument('--sup_epoch', type=int, default=1e6, help='legacy option; use contrastive_mode=supervised for true-label SupCon')
         parser.add_argument('--temperature', type=float, default=0.07, help='the temperature used in supervised training loss')
         parser.add_argument('--curvature', type=float, default=1.0, help='the curvature of the Poincaré ball')
-        parser.add_argument('--contrastive_mode', default='augmentation', choices=['augmentation', 'supervised', 'pseudo_hard', 'pseudo_soft'], help='primary contrastive objective: augmentation-only, true-label SupCon, hard pseudo-label SupCon, or soft pseudo-label SupCon')
+        parser.add_argument('--contrastive_mode', default=None, choices=CONTRASTIVE_MODES, help='fallback contrastive objective when contrastive_schedule is omitted')
+        parser.add_argument('--contrastive_schedule', default=None, help='list of epoch phases with mode, start_epoch, end_epoch, and optional transition_epochs')
         parser.add_argument('--lambda_sink', type=float, default=1.0, help='maximum weight for Sinkhorn clustering loss')
         parser.add_argument('--cluster_warmup_steps', type=int, default=1000, help='MoCo-only iterations before Sinkhorn loss')
         parser.add_argument('--cluster_ramp_steps', type=int, default=2000, help='iterations used to ramp Sinkhorn loss weight')
@@ -411,6 +417,57 @@ class SkeletonCLR_Processor(PT_Processor):
         )
         return loss_sink, loss_hier, metrics
 
+    def _compute_scheduled_contrastive_loss(
+        self,
+        epoch,
+        features_sup,
+        cluster_pack=None,
+        output=None,
+        target=None,
+        labels=None,
+        stream_outputs=None,
+    ):
+        active_phases = self._active_contrastive_phases(epoch)
+        total_loss = None
+        metrics = {
+            "contrastive_mode": self._format_contrastive_phases(active_phases),
+            "contrastive_schedule_weight_sum": sum(weight for _, weight in active_phases),
+        }
+
+        for phase_index, (phase, phase_weight) in enumerate(active_phases):
+            phase_loss, phase_metrics = self._compute_contrastive_mode_loss(
+                mode=phase["mode"],
+                phase=phase,
+                features_sup=features_sup,
+                cluster_pack=cluster_pack,
+                output=output,
+                target=target,
+                labels=labels,
+                stream_outputs=stream_outputs,
+            )
+            weighted_loss = float(phase_weight) * phase_loss
+            total_loss = weighted_loss if total_loss is None else total_loss + weighted_loss
+
+            metrics[f"contrastive_phase_{phase_index}_mode"] = phase["mode"]
+            metrics[f"contrastive_phase_{phase_index}_weight"] = float(phase_weight)
+            metrics[f"contrastive_phase_{phase_index}_loss"] = phase_loss.detach().item()
+            metrics[f"contrastive_weight_{phase['mode']}"] = (
+                metrics.get(f"contrastive_weight_{phase['mode']}", 0.0)
+                + float(phase_weight)
+            )
+
+            if len(active_phases) == 1:
+                metrics.update(phase_metrics)
+            else:
+                for key, value in phase_metrics.items():
+                    if key == "contrastive_mode":
+                        continue
+                    metrics[f"contrastive_phase_{phase_index}_{key}"] = value
+                    if key in ("loss_joint", "loss_motion", "loss_bone"):
+                        metrics[key] = value
+
+        return total_loss, metrics
+
     def _compute_contrastive_mode_loss(
         self,
         features_sup,
@@ -419,11 +476,15 @@ class SkeletonCLR_Processor(PT_Processor):
         target=None,
         labels=None,
         stream_outputs=None,
+        mode=None,
+        phase=None,
     ):
-        mode = self.arg.contrastive_mode
+        mode = mode or getattr(self.arg, 'contrastive_mode', None) or 'augmentation'
+        phase = phase or {}
+        lambda_aug = float(self._phase_value(phase, 'lambda_aug', self.arg.lambda_aug))
         metrics = {
             "contrastive_mode": mode,
-            "lambda_aug_effective": float(self.arg.lambda_aug),
+            "lambda_aug_effective": lambda_aug,
             "lambda_pseudo_effective": 0.0,
         }
 
@@ -434,6 +495,12 @@ class SkeletonCLR_Processor(PT_Processor):
                 return self.loss(output, target), metrics
 
             losses = [self.loss(stream_output, target) for stream_output in stream_outputs]
+            if len(losses) == 3:
+                metrics.update({
+                    "loss_joint": losses[0].detach().item(),
+                    "loss_motion": losses[1].detach().item(),
+                    "loss_bone": losses[2].detach().item(),
+                })
             return sum(losses), metrics
 
         if features_sup is None:
@@ -449,11 +516,16 @@ class SkeletonCLR_Processor(PT_Processor):
         if not isinstance(cluster_pack, dict):
             raise ValueError("cluster_pack must be a dict when provided")
 
-        posteriors = self._pseudo_supcon_posteriors(cluster_pack)
+        assignment_source = self._phase_value(
+            phase,
+            'pseudo_supcon_assignment_source',
+            self.arg.pseudo_supcon_assignment_source,
+        )
+        posteriors = self._pseudo_supcon_posteriors(cluster_pack, assignment_source)
         if posteriors is None:
             raise ValueError(
                 f"{mode} mode requires posterior source "
-                f"{self.arg.pseudo_supcon_assignment_source!r}"
+                f"{assignment_source!r}"
             )
         if posteriors.size(0) != features_sup.size(0):
             raise ValueError(
@@ -461,16 +533,32 @@ class SkeletonCLR_Processor(PT_Processor):
                 f"sizes, got {posteriors.size(0)} and {features_sup.size(0)}"
             )
 
+        lambda_pseudo_max = self._phase_value(phase, 'lambda_pseudo', None)
+        if lambda_pseudo_max is None:
+            lambda_pseudo_max = self._max_lambda_pseudo()
+
         pseudo_weight = self._ramp_weight(
-            self._max_lambda_pseudo(),
-            self.arg.pseudo_supcon_warmup_steps,
-            self.arg.pseudo_supcon_ramp_steps,
+            lambda_pseudo_max,
+            self._phase_value(
+                phase,
+                'pseudo_supcon_warmup_steps',
+                self.arg.pseudo_supcon_warmup_steps,
+            ),
+            self._phase_value(
+                phase,
+                'pseudo_supcon_ramp_steps',
+                self.arg.pseudo_supcon_ramp_steps,
+            ),
         )
         mask, pseudo_labels, confidence, confident = pseudo_label_mask_from_posteriors(
             posteriors,
-            confidence_threshold=self.arg.pseudo_supcon_confidence_threshold,
+            confidence_threshold=self._phase_value(
+                phase,
+                'pseudo_supcon_confidence_threshold',
+                self.arg.pseudo_supcon_confidence_threshold,
+            ),
             mode=mode,
-            lambda_aug=self.arg.lambda_aug,
+            lambda_aug=lambda_aug,
             lambda_pseudo=pseudo_weight,
         )
         metrics.update(
@@ -480,8 +568,8 @@ class SkeletonCLR_Processor(PT_Processor):
 
         return self.criterion(features_sup, mask=mask), metrics
 
-    def _pseudo_supcon_posteriors(self, cluster_pack):
-        source = self.arg.pseudo_supcon_assignment_source
+    def _pseudo_supcon_posteriors(self, cluster_pack, source=None):
+        source = source or self.arg.pseudo_supcon_assignment_source
         if source == 'p_mean':
             p_q = cluster_pack.get('p_q', None)
             p_k = cluster_pack.get('p_k', None)
@@ -493,6 +581,139 @@ class SkeletonCLR_Processor(PT_Processor):
         if posteriors is None:
             return None
         return posteriors.detach()
+
+    @classmethod
+    def _valid_contrastive_modes(cls):
+        return CONTRASTIVE_MODES
+
+    def _normalize_contrastive_schedule(self):
+        schedule = getattr(self.arg, 'contrastive_schedule', None)
+        fallback_mode = getattr(self.arg, 'contrastive_mode', None)
+
+        if schedule is None:
+            schedule = [{
+                "mode": fallback_mode or "augmentation",
+                "start_epoch": 1,
+                "end_epoch": int(self.arg.num_epoch),
+            }]
+        elif fallback_mode is not None:
+            raise ValueError(
+                "Use either contrastive_schedule or contrastive_mode, not both"
+            )
+        elif isinstance(schedule, str):
+            parsed_schedule = yaml.safe_load(schedule)
+            schedule = parsed_schedule
+
+        if isinstance(schedule, dict):
+            schedule = [schedule]
+        if not isinstance(schedule, list) or not schedule:
+            raise ValueError("contrastive_schedule must be a non-empty list")
+
+        normalized = []
+        for index, phase in enumerate(schedule):
+            if not isinstance(phase, dict):
+                raise ValueError("each contrastive_schedule phase must be a dict")
+            normalized_phase = dict(phase)
+            mode = normalized_phase.get("mode")
+            if mode not in self._valid_contrastive_modes():
+                raise ValueError(
+                    "contrastive_schedule phase {} has invalid mode {!r}; "
+                    "expected one of {}".format(
+                        index,
+                        mode,
+                        self._valid_contrastive_modes(),
+                    )
+                )
+
+            if "start_epoch" not in normalized_phase or "end_epoch" not in normalized_phase:
+                raise ValueError(
+                    "each contrastive_schedule phase needs start_epoch and end_epoch"
+                )
+            start_epoch = int(normalized_phase["start_epoch"])
+            end_epoch = int(normalized_phase["end_epoch"])
+            transition_epochs = int(normalized_phase.get("transition_epochs", 0))
+
+            if start_epoch < 1:
+                raise ValueError("contrastive_schedule start_epoch must be >= 1")
+            if end_epoch < start_epoch:
+                raise ValueError("contrastive_schedule end_epoch must be >= start_epoch")
+            if transition_epochs < 0:
+                raise ValueError("contrastive_schedule transition_epochs must be >= 0")
+            if transition_epochs > (end_epoch - start_epoch + 1):
+                raise ValueError(
+                    "contrastive_schedule transition_epochs must not exceed phase length"
+                )
+            if index == 0 and transition_epochs:
+                raise ValueError("first contrastive_schedule phase cannot transition in")
+
+            normalized_phase["mode"] = mode
+            normalized_phase["start_epoch"] = start_epoch
+            normalized_phase["end_epoch"] = end_epoch
+            normalized_phase["transition_epochs"] = transition_epochs
+            normalized.append(normalized_phase)
+
+        normalized.sort(key=lambda item: item["start_epoch"])
+        expected_start = 1
+        max_epoch = int(self.arg.num_epoch)
+        for phase in normalized:
+            if phase["start_epoch"] != expected_start:
+                raise ValueError(
+                    "contrastive_schedule must cover epochs without gaps or overlaps; "
+                    f"expected start_epoch {expected_start}, got {phase['start_epoch']}"
+                )
+            expected_start = phase["end_epoch"] + 1
+            if phase["start_epoch"] > max_epoch:
+                raise ValueError("contrastive_schedule starts after num_epoch")
+            if expected_start > max_epoch:
+                break
+        if expected_start <= max_epoch:
+            raise ValueError(
+                "contrastive_schedule must cover all epochs through num_epoch; "
+                f"missing epochs {expected_start}-{max_epoch}"
+            )
+
+        return normalized
+
+    def _active_contrastive_phases(self, epoch):
+        schedule = getattr(self, "contrastive_schedule", None)
+        if schedule is None:
+            schedule = self._normalize_contrastive_schedule()
+
+        for index, phase in enumerate(schedule):
+            if phase["start_epoch"] <= epoch <= phase["end_epoch"]:
+                transition_epochs = phase.get("transition_epochs", 0)
+                if index > 0 and transition_epochs > 0:
+                    transition_end = phase["start_epoch"] + transition_epochs - 1
+                    if epoch <= transition_end:
+                        progress = (
+                            epoch - phase["start_epoch"] + 1
+                        ) / float(transition_epochs + 1)
+                        previous_phase = schedule[index - 1]
+                        return [
+                            (previous_phase, 1.0 - progress),
+                            (phase, progress),
+                        ]
+                return [(phase, 1.0)]
+
+        raise ValueError(f"No contrastive_schedule phase covers epoch {epoch}")
+
+    def _format_active_contrastive_modes(self, epoch):
+        return self._format_contrastive_phases(self._active_contrastive_phases(epoch))
+
+    @staticmethod
+    def _format_contrastive_phases(active_phases):
+        if len(active_phases) == 1:
+            return active_phases[0][0]["mode"]
+        return "+".join(
+            "{}:{:.3f}".format(phase["mode"], weight)
+            for phase, weight in active_phases
+        )
+
+    @staticmethod
+    def _phase_value(phase, key, default):
+        if phase is not None and key in phase:
+            return phase[key]
+        return default
 
     def _max_lambda_pseudo(self):
         if self.arg.lambda_pseudo is not None:

@@ -1,4 +1,4 @@
-work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/3views_c005_cosann_hyp_clust
+work_dir: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/3views_c005_cosann_hyp_pseudo_supcon
 
 #weights: work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/unsupervised/epoch150_model.pt
 #ignore_weights: [encoder_q.fc, encoder_q_motion.fc, encoder_q_bone.fc, encoder_k, encoder_k_motion, encoder_k_bone, queue, queue_motion, queue_bone]
@@ -63,7 +63,13 @@ view: 'all'
 contrastive_schedule:
   - mode: augmentation
     start_epoch: 1
+    end_epoch: 150
+  - mode: pseudo_hard
+    start_epoch: 151
     end_epoch: 300
+    transition_epochs: 10
+    lambda_aug: 1.0
+    lambda_pseudo: 0.2
 temperature: 0.07
 curvature: 1.0
 lambda_sink: 1.0
@@ -74,6 +80,10 @@ hier_triplets: 512
 hier_margin: 0.05
 affinity_momentum: 0.9
 affinity_temperature: 1.0
+pseudo_supcon_warmup_steps: 1000
+pseudo_supcon_ramp_steps: 2000
+pseudo_supcon_confidence_threshold: 0.8
+pseudo_supcon_assignment_source: q_k
 
 # live embedding diagnostics
 embedding_plot_interval: 5
