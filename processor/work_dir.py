@@ -31,6 +31,8 @@ _SKELETONCLR_FAMILY_ALIASES = (
     ('skeletonclr_att', 'skeletonclr_att'),
 )
 
+_PSEUDO_CONTRASTIVE_MODES = ('pseudo_hard', 'pseudo_soft')
+
 
 def prepare_training_work_dir(work_dir, mode='auto', run_id=None, run_subdir='runs'):
     """Return and reserve the effective work directory for a training run."""
@@ -218,6 +220,9 @@ def _build_experiment_component(arg, family=None):
         if num_clusters is not None:
             tags.append('clust{}'.format(num_clusters))
 
+    if _uses_pseudo_labels(arg):
+        tags.append('pseudo')
+
     base_lr = getattr(arg, 'base_lr', None)
     if base_lr is not None:
         tags.append('lrb{}'.format(_format_value(base_lr)))
@@ -236,6 +241,34 @@ def _build_experiment_component(arg, family=None):
     if not tags:
         tags.append('default')
     return _slug('-'.join(tags))
+
+
+def _uses_pseudo_labels(arg):
+    mode = getattr(arg, 'contrastive_mode', None)
+    if mode in _PSEUDO_CONTRASTIVE_MODES:
+        return True
+    return any(
+        mode in _PSEUDO_CONTRASTIVE_MODES
+        for mode in _contrastive_schedule_modes(getattr(arg, 'contrastive_schedule', None))
+    )
+
+
+def _contrastive_schedule_modes(schedule):
+    if schedule is None:
+        return []
+    if isinstance(schedule, str):
+        return [
+            mode for mode in _PSEUDO_CONTRASTIVE_MODES
+            if mode in schedule.lower()
+        ]
+    if isinstance(schedule, dict):
+        schedule = [schedule]
+    if not isinstance(schedule, list):
+        return []
+    return [
+        phase.get('mode') for phase in schedule
+        if isinstance(phase, dict)
+    ]
 
 
 def _linear_eval_scheduler_detail_tags(arg, scheduler_tag):

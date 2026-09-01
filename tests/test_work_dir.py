@@ -75,6 +75,45 @@ class TrainingWorkDirTest(unittest.TestCase):
                 'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
                 'geoopt-c1-clust5-lrb0p05-multistep'))
 
+    def test_canonical_encodes_pseudo_supcon_schedule(self):
+        arg = Namespace(
+            work_dir='work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150/c005_cosann_hyp_pseudo_supcon',
+            config='config/SkeletonCLR/skeletonclr_xview_hyp_pseudo_supcon.yaml',
+            model='net.skeletonclr.SkeletonCLR',
+            model_args={
+                'num_class': 60,
+                'hidden_channels': 16,
+                'curvature': 1.0,
+                'cluster_enabled': True,
+                'num_clusters': 5,
+            },
+            train_feeder_args={'data_path': 'xview/train_position.npy'},
+            test_feeder_args={},
+            contrastive_schedule=[
+                {'mode': 'augmentation', 'start_epoch': 1, 'end_epoch': 150},
+                {'mode': 'pseudo_hard', 'start_epoch': 151, 'end_epoch': 300},
+            ],
+            base_lr=0.01,
+            step=[],
+            lr_scheduler='cosine',
+        )
+
+        resolved = build_canonical_work_dir(arg, processor_name='SkeletonCLR_Processor')
+        name, group = wandb_run_identity_from_work_dir(
+            os.path.join(resolved, 'runs', '20260825-143012_pid12345')
+        )
+
+        self.assertEqual(
+            resolved,
+            os.path.normpath(
+                'work_dir/skeletonclr/ntu60-xview-frame50-hc16/'
+                'geoopt-c1-clust5-pseudo-lrb0p01-cosine'))
+        self.assertEqual(
+            name,
+            'skeletonclr/ntu60-xview-frame50-hc16/'
+            'geoopt-c1-clust5-pseudo-lrb0p01-cosine')
+        self.assertIsNone(group)
+
     def test_canonical_uses_xsubject_for_xsub_dataset(self):
         arg = Namespace(
             work_dir='work_dir/skeletonclr/1_xview_frame50_channel16_epoch300_cross150',
