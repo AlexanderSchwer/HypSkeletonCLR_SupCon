@@ -23,7 +23,7 @@ from .processor import Processor
 from .pretrain import PT_Processor, add_lr_scheduler_args
 from .wandb_utils import init_wandb_from_work_dir
 
-from tools.losses import SupConLoss
+from tools.losses import SupConLoss, pseudo_cluster_distance_floor_loss
 from tools.hyperbolic_hierarchy import (
     prototype_affinity_hyp,
     update_affinity_ema,
@@ -324,6 +324,9 @@ class SkeletonCLR_Processor(PT_Processor):
         parser.add_argument('--pseudo_supcon_ramp_steps', type=int, default=0, help='iterations used to ramp pseudo-label positive weights')
         parser.add_argument('--pseudo_supcon_confidence_threshold', type=float, default=0.8, help='minimum prototype posterior confidence for pseudo-label positives')
         parser.add_argument('--pseudo_supcon_assignment_source', default='q_k', choices=['p_q', 'p_k', 'q_k', 'p_mean'], help='cluster posterior used to form pseudo labels')
+        parser.add_argument('--pseudo_supcon_normalize_pseudo_mass', type=str2bool, default=False, help='treat lambda_pseudo as total off-diagonal pseudo-positive mass per anchor')
+        parser.add_argument('--pseudo_supcon_distance_floor', type=float, default=0.0, help='minimum hyperbolic distance for off-diagonal pseudo-positive pairs; 0 disables')
+        parser.add_argument('--lambda_pseudo_spread', type=float, default=0.0, help='maximum weight for the pseudo-positive distance-floor regularizer')
         parser.add_argument('--wandb_offline', type=str2bool, default=False, help='log W&B offline and automatically sync the run when the script exits')
         parser.add_argument('--wandb_disabled', type=str2bool, default=False, help='disable W&B init, logging, finishing, and sync completely')
         parser.add_argument('--embedding_plot_interval', type=int, default=0, help='render embedding diagnostic plots every N epochs; 0 disables live plotting')
@@ -486,6 +489,7 @@ class SkeletonCLR_Processor(PT_Processor):
             "contrastive_mode": mode,
             "lambda_aug_effective": lambda_aug,
             "lambda_pseudo_effective": 0.0,
+            "lambda_pseudo_spread_effective": 0.0,
         }
 
         if mode == "augmentation":
@@ -560,13 +564,58 @@ class SkeletonCLR_Processor(PT_Processor):
             mode=mode,
             lambda_aug=lambda_aug,
             lambda_pseudo=pseudo_weight,
+            normalize_pseudo_mass=self._phase_value(
+                phase,
+                'pseudo_supcon_normalize_pseudo_mass',
+                getattr(self.arg, 'pseudo_supcon_normalize_pseudo_mass', False),
+            ),
         )
         metrics.update(
             self._pseudo_supcon_metrics(mask, pseudo_labels, confidence, confident)
         )
         metrics["lambda_pseudo_effective"] = pseudo_weight
 
-        return self.criterion(features_sup, mask=mask), metrics
+        loss = self.criterion(features_sup, mask=mask)
+
+        spread_weight_max = self._phase_value(
+            phase,
+            'lambda_pseudo_spread',
+            getattr(self.arg, 'lambda_pseudo_spread', 0.0),
+        )
+        spread_weight = self._ramp_weight(
+            spread_weight_max,
+            self._phase_value(
+                phase,
+                'pseudo_supcon_warmup_steps',
+                self.arg.pseudo_supcon_warmup_steps,
+            ),
+            self._phase_value(
+                phase,
+                'pseudo_supcon_ramp_steps',
+                self.arg.pseudo_supcon_ramp_steps,
+            ),
+        )
+        distance_floor = float(self._phase_value(
+            phase,
+            'pseudo_supcon_distance_floor',
+            getattr(self.arg, 'pseudo_supcon_distance_floor', 0.0),
+        ))
+
+        if spread_weight > 0.0 and distance_floor > 0.0:
+            pseudo_pair_weights = mask.clone()
+            pseudo_pair_weights.fill_diagonal_(0.0)
+            loss_spread, spread_metrics = pseudo_cluster_distance_floor_loss(
+                features_sup,
+                pseudo_pair_weights,
+                distance_floor=distance_floor,
+                curvature=self.arg.curvature,
+            )
+            loss = loss + spread_weight * loss_spread
+            metrics.update(spread_metrics)
+            metrics["loss_pseudo_spread"] = loss_spread.detach().item()
+            metrics["lambda_pseudo_spread_effective"] = spread_weight
+
+        return loss, metrics
 
     def _pseudo_supcon_posteriors(self, cluster_pack, source=None):
         source = source or self.arg.pseudo_supcon_assignment_source
@@ -727,7 +776,10 @@ class SkeletonCLR_Processor(PT_Processor):
         with torch.no_grad():
             batch_size = mask.size(0)
             identity = torch.eye(batch_size, dtype=torch.bool, device=mask.device)
-            extra_positive_pairs = ((mask > 0) & ~identity).sum()
+            off_diagonal_mask = ~identity
+            extra_positive_pairs = ((mask > 0) & off_diagonal_mask).sum()
+            extra_positive_mass = mask * off_diagonal_mask.to(mask.dtype)
+            per_anchor_mass = extra_positive_mass.sum(dim=1)
             possible_extra_pairs = max(1, batch_size * (batch_size - 1))
             active_clusters = (
                 int(pseudo_labels[confident].unique().numel())
@@ -742,6 +794,8 @@ class SkeletonCLR_Processor(PT_Processor):
                 "pseudo_supcon_extra_positive_density": (
                     extra_positive_pairs.float() / float(possible_extra_pairs)
                 ).item(),
+                "pseudo_supcon_extra_positive_mass_mean": per_anchor_mass.mean().item(),
+                "pseudo_supcon_extra_positive_mass_max": per_anchor_mass.max().item(),
             }
 
     def _ramp_weight(self, maximum, warmup_steps, ramp_steps):

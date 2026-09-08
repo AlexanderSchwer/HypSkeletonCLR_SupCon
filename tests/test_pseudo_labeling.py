@@ -86,6 +86,35 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
         )
         torch.testing.assert_close(mask, expected_mask)
 
+    def test_normalized_hard_pseudo_mask_keeps_fixed_anchor_mass(self):
+        posteriors = torch.tensor(
+            [
+                [0.90, 0.10],
+                [0.85, 0.15],
+                [0.88, 0.12],
+                [0.20, 0.80],
+            ]
+        )
+
+        mask, _, _, _ = pseudo_label_mask_from_posteriors(
+            posteriors,
+            confidence_threshold=0.8,
+            mode="pseudo_hard",
+            lambda_aug=1.0,
+            lambda_pseudo=0.6,
+            normalize_pseudo_mass=True,
+        )
+
+        expected_mask = torch.tensor(
+            [
+                [1.0, 0.3, 0.3, 0.0],
+                [0.3, 1.0, 0.3, 0.0],
+                [0.3, 0.3, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        torch.testing.assert_close(mask, expected_mask)
+
     def test_soft_pseudo_mask_uses_posterior_overlap(self):
         posteriors = torch.tensor(
             [
@@ -114,6 +143,29 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
         )
         torch.testing.assert_close(mask, expected_mask)
 
+    def test_normalized_soft_pseudo_mask_keeps_fixed_anchor_mass(self):
+        posteriors = torch.tensor(
+            [
+                [0.90, 0.10],
+                [0.80, 0.20],
+                [0.20, 0.80],
+                [0.55, 0.45],
+            ]
+        )
+
+        mask, _, _, _ = pseudo_label_mask_from_posteriors(
+            posteriors,
+            confidence_threshold=0.8,
+            mode="pseudo_soft",
+            lambda_aug=1.0,
+            lambda_pseudo=0.5,
+            normalize_pseudo_mass=True,
+        )
+
+        off_diagonal_mass = mask - torch.eye(4)
+        torch.testing.assert_close(off_diagonal_mass[:3].sum(dim=1), torch.full((3,), 0.5))
+        torch.testing.assert_close(off_diagonal_mass[3].sum(), torch.tensor(0.0))
+
     def test_invalid_posterior_inputs_are_rejected(self):
         with self.assertRaises(ValueError):
             pseudo_label_mask_from_posteriors(torch.rand(4), confidence_threshold=0.8)
@@ -131,6 +183,8 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
             pseudo_label_mask_from_posteriors(torch.tensor([[float("nan"), 0.1]]), confidence_threshold=0.8)
         with self.assertRaises(ValueError):
             pseudo_label_mask_from_posteriors(torch.tensor([[1, 0]]), confidence_threshold=0.8)
+        with self.assertRaises(ValueError):
+            pseudo_label_mask_from_posteriors(torch.rand(4, 2), normalize_pseudo_mass=1)
 
     def test_processor_uses_selected_posterior_source_for_pseudo_supcon(self):
         if not HAS_GEOOPT:
@@ -363,6 +417,42 @@ class PrototypePseudoLabelingTest(unittest.TestCase):
         loss.backward()
 
         self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(torch.isfinite(raw.grad).all())
+
+    @unittest.skipUnless(HAS_GEOOPT, "geoopt is required for hyperbolic distance floor")
+    def test_pseudo_cluster_distance_floor_loss_pushes_too_close_pairs(self):
+        import geoopt
+
+        from tools.losses import pseudo_cluster_distance_floor_loss
+
+        manifold = geoopt.PoincareBall(1.0)
+        raw = torch.tensor(
+            [
+                [[0.01, 0.00], [0.02, 0.00]],
+                [[0.03, 0.00], [0.04, 0.00]],
+                [[0.40, 0.00], [0.45, 0.00]],
+            ],
+            requires_grad=True,
+        )
+        features = manifold.expmap0(raw)
+        weights = torch.tensor(
+            [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ]
+        )
+
+        loss, metrics = pseudo_cluster_distance_floor_loss(
+            features,
+            weights,
+            distance_floor=0.2,
+            curvature=1.0,
+        )
+        loss.backward()
+
+        self.assertGreater(loss.item(), 0.0)
+        self.assertGreater(metrics["pseudo_supcon_floor_violation_fraction"], 0.0)
         self.assertTrue(torch.isfinite(raw.grad).all())
 
     @unittest.skipUnless(HAS_GEOOPT, "geoopt is required for hyperbolic SupCon")

@@ -20,15 +20,25 @@ def pseudo_label_mask_from_posteriors(
     mode="pseudo_hard",
     lambda_aug=1.0,
     lambda_pseudo=1.0,
+    normalize_pseudo_mass=False,
 ):
     """
     Build a weighted SupCon mask from prototype posterior probabilities.
 
     The diagonal represents augmentation positives for the same original clip.
     Off-diagonal weights come from hard or soft pseudo-label assignments.
+    When normalize_pseudo_mass is enabled, lambda_pseudo is interpreted as the
+    total off-diagonal pseudo-positive mass per anchor instead of a per-pair
+    weight.
     """
     _validate_posteriors(posteriors)
-    _validate_pseudo_args(confidence_threshold, mode, lambda_aug, lambda_pseudo)
+    _validate_pseudo_args(
+        confidence_threshold,
+        mode,
+        lambda_aug,
+        lambda_pseudo,
+        normalize_pseudo_mass,
+    )
 
     with torch.no_grad():
         posteriors = posteriors.detach()
@@ -49,14 +59,27 @@ def pseudo_label_mask_from_posteriors(
 
         if mode == "pseudo_hard":
             same_cluster = pseudo_labels.view(-1, 1).eq(pseudo_labels.view(1, -1))
-            pseudo_weights = same_cluster & confident_pair & off_diagonal
-            mask = mask + float(lambda_pseudo) * pseudo_weights.to(posteriors.dtype)
+            pseudo_weights = (
+                same_cluster & confident_pair & off_diagonal
+            ).to(posteriors.dtype)
         elif mode == "pseudo_soft":
             posterior_similarity = posteriors @ posteriors.T
-            pseudo_weights = posterior_similarity * confident_pair.to(posteriors.dtype)
-            mask = mask + float(lambda_pseudo) * pseudo_weights * off_diagonal.to(posteriors.dtype)
+            pseudo_weights = (
+                posterior_similarity
+                * confident_pair.to(posteriors.dtype)
+                * off_diagonal.to(posteriors.dtype)
+            )
         else:
             raise ValueError(f"Unknown pseudo contrastive mode: {mode}")
+
+        if normalize_pseudo_mass:
+            pseudo_mass = pseudo_weights.sum(dim=1, keepdim=True)
+            pseudo_weights = torch.where(
+                pseudo_mass > 0,
+                pseudo_weights / pseudo_mass.clamp_min(1e-12),
+                pseudo_weights,
+            )
+        mask = mask + float(lambda_pseudo) * pseudo_weights
 
     return mask, pseudo_labels, confidence, confident
 
@@ -76,7 +99,13 @@ def _validate_posteriors(posteriors):
         raise ValueError("posteriors must be non-negative")
 
 
-def _validate_pseudo_args(confidence_threshold, mode, lambda_aug, lambda_pseudo):
+def _validate_pseudo_args(
+    confidence_threshold,
+    mode,
+    lambda_aug,
+    lambda_pseudo,
+    normalize_pseudo_mass=False,
+):
     if mode not in PSEUDO_CONTRASTIVE_MODES:
         raise ValueError(
             f"mode must be one of {PSEUDO_CONTRASTIVE_MODES}, got {mode!r}"
@@ -87,3 +116,5 @@ def _validate_pseudo_args(confidence_threshold, mode, lambda_aug, lambda_pseudo)
         raise ValueError("lambda_aug must be non-negative")
     if lambda_pseudo < 0:
         raise ValueError("lambda_pseudo must be non-negative")
+    if not isinstance(normalize_pseudo_mass, bool):
+        raise ValueError("normalize_pseudo_mass must be boolean")

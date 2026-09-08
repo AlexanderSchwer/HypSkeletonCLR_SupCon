@@ -10,6 +10,70 @@ import torch.nn as nn
 import geoopt as gt
 
 
+def pseudo_cluster_distance_floor_loss(
+    features,
+    pseudo_pair_weights,
+    distance_floor,
+    curvature=1.0,
+):
+    """Penalize pseudo-positive pairs that become closer than distance_floor."""
+    if distance_floor < 0:
+        raise ValueError("distance_floor must be non-negative")
+    if len(features.shape) < 3:
+        raise ValueError(
+            "`features` needs to be [bsz, n_views, ...], at least 3 dimensions are required"
+        )
+    if len(features.shape) > 3:
+        features = features.view(features.shape[0], features.shape[1], -1)
+
+    batch_size = features.shape[0]
+    if pseudo_pair_weights.shape != (batch_size, batch_size):
+        raise ValueError(
+            f"`pseudo_pair_weights` must have shape [{batch_size}, {batch_size}], "
+            f"got {tuple(pseudo_pair_weights.shape)}"
+        )
+
+    device = features.device
+    weights = pseudo_pair_weights.float().to(device)
+    identity = torch.eye(batch_size, dtype=torch.bool, device=device)
+    weights = weights * (~identity).to(weights.dtype)
+    weights = weights.clamp_min(0.0)
+
+    contrast_count = features.shape[1]
+    pair_weights = weights.repeat(contrast_count, contrast_count)
+    total_weight = pair_weights.sum()
+    if float(total_weight.detach().cpu()) <= 1e-12 or distance_floor == 0:
+        zero_loss = features.sum() * 0.0
+        return zero_loss, {
+            "pseudo_supcon_distance_floor": float(distance_floor),
+            "pseudo_supcon_floor_pair_distance_mean": 0.0,
+            "pseudo_supcon_floor_violation_fraction": 0.0,
+        }
+
+    contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0)
+    poincare_ball = gt.PoincareBall(curvature)
+    pair_dist = poincare_ball.dist(
+        contrast_feature.unsqueeze(1),
+        contrast_feature.unsqueeze(0),
+    )
+    violation = torch.relu(float(distance_floor) - pair_dist)
+    loss = (pair_weights * violation.pow(2)).sum() / total_weight.clamp_min(1e-12)
+
+    with torch.no_grad():
+        active = pair_weights > 0
+        violating = active & (violation > 0)
+        metrics = {
+            "pseudo_supcon_distance_floor": float(distance_floor),
+            "pseudo_supcon_floor_pair_distance_mean": (
+                (pair_weights * pair_dist).sum() / total_weight.clamp_min(1e-12)
+            ).item(),
+            "pseudo_supcon_floor_violation_fraction": (
+                violating.float().sum() / active.float().sum().clamp_min(1.0)
+            ).item(),
+        }
+    return loss, metrics
+
+
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
     It also supports the unsupervised contrastive loss in SimCLR"""

@@ -84,6 +84,9 @@ pseudo_supcon_warmup_steps: 1000
 pseudo_supcon_ramp_steps: 2000
 pseudo_supcon_confidence_threshold: 0.8
 pseudo_supcon_assignment_source: q_k
+pseudo_supcon_normalize_pseudo_mass: True
+pseudo_supcon_distance_floor: 0.1
+lambda_pseudo_spread: 1.0
 
 # live embedding diagnostics
 embedding_plot_interval: 5

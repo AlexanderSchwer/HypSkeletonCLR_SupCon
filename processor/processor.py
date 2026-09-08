@@ -44,6 +44,18 @@ class Processor(IO):
         Base Processor
     """
 
+    ITER_LOG_KEYS = (
+        'loss',
+        'loss_base',
+        'contrastive_mode',
+        'loss_joint',
+        'loss_motion',
+        'loss_bone',
+        'loss_sink',
+        'loss_hier',
+        'lr',
+    )
+
     def __init__(self, argv=None):
 
         self.load_arg(argv)
@@ -165,7 +177,8 @@ class Processor(IO):
     def show_iter_info(self):
         if self.meta_info['iter'] % self.arg.log_interval == 0:
             info ='\tIter {} Done.'.format(self.meta_info['iter'])
-            for k, v in self.iter_info.items():
+            log_info = self._compact_iter_info()
+            for k, v in log_info.items():
                 if isinstance(v, float):
                     info = info + ' | {}: {:.4f}'.format(k, v)
                 else:
@@ -174,7 +187,15 @@ class Processor(IO):
             self.io.print_log(info)
 
             if self.arg.pavi_log:
-                self.io.log('train', self.meta_info['iter'], self.iter_info)
+                self.io.log('train', self.meta_info['iter'], log_info)
+
+    def _compact_iter_info(self):
+        compact = {
+            key: self.iter_info[key]
+            for key in self.ITER_LOG_KEYS
+            if key in self.iter_info
+        }
+        return compact if compact else self.iter_info
 
     def train(self):
         for _ in range(100):
